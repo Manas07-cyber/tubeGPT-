@@ -2,11 +2,11 @@
 
 **Effective date: 7 November 2026**
 
-This policy describes the data handling of the current tubeGPT project files inspected for this documentation release. It is not a statement about the separate privacy practices of ChatGPT, YouTube, Google, or other third-party services.
+This policy describes the data handling of the current tubeGPT project files inspected for this documentation release. It is not a statement about the separate privacy practices of ChatGPT, YouTube, Google, Anthropic, or other third-party services.
 
 ## 1. Who operates tubeGPT
 
-tubeGPT is an independent project. The preferred public project label is **Manas D**; the publisher identity shown in any platform directory remains subject to that platform's verification requirements.
+tubeGPT is an independent project. The preferred public project label is **Manas D**; the publisher identity shown in any platform directory remains subject to that platform's verification requirements. The project idea was inspired by AskAVideo and the implementation was developed with Claude AI assistance. AskAVideo and Anthropic do not operate tubeGPT.
 
 ## 2. Information that may be processed
 
@@ -33,6 +33,7 @@ The inspected project code does not contain a developer-operated backend, develo
 - **ChatGPT/OpenAI:** If you use tubeGPT through ChatGPT, prompts, uploaded files, and outputs are handled by the host platform under its applicable terms, privacy policy, and account settings. Review OpenAI's current privacy information at https://openai.com/policies/privacy-policy/.
 - **YouTube/Google:** Requests for captions or video metadata are subject to the relevant YouTube/Google services, availability, and policies. Review https://policies.google.com/privacy and YouTube's terms at https://www.youtube.com/t/terms.
 - **Execution environment:** Temporary files may be subject to the host environment's storage, logging, and cleanup behavior.
+- **Development assistance:** Claude AI was used as a development assistant. This development history does not mean user transcripts are sent to Claude by the released helper script. Any future integration that sends user data to an additional provider must be disclosed before release.
 
 tubeGPT does not control these third-party services and cannot make promises on their behalf.
 

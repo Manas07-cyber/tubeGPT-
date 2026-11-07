@@ -2,9 +2,11 @@
 
 **Explore YouTube video transcripts with summaries, searchable notes, and timestamped answers.**
 
-tubeGPT is an independent, skills-based ChatGPT project designed to help users work with the captions/transcripts of YouTube videos. It uses available transcript text as its source and links answers back to relevant video timestamps where possible.
+tubeGPT is an independently developed, skills-based ChatGPT project that helps users work with transcript text from YouTube videos. It uses available transcript content as its source and links answers to relevant video timestamps where possible.
 
-> **Status:** Documentation and public project setup are in progress. Availability and compatibility depend on the host platform, the video, and whether captions can be accessed.
+> **Development note:** The project idea was inspired by AskAVideo. tubeGPT was independently implemented with Claude AI used as a development assistant. tubeGPT is not affiliated with, endorsed by, or operated by AskAVideo, YouTube, Google, Anthropic, or OpenAI.
+
+> **Status:** Public documentation and project setup are in progress. Platform listing and availability are not yet confirmed. Compatibility depends on the host platform, the video, and whether captions can be accessed.
 
 ## What it does
 
@@ -19,14 +21,14 @@ tubeGPT is an independent, skills-based ChatGPT project designed to help users w
 
 - It does not guarantee captions for every video, language, region, or account.
 - It does not verify that captions are complete or accurate.
-- It is not affiliated with, endorsed by, or operated by YouTube or Google.
+- It is not affiliated with or endorsed by AskAVideo, YouTube, Google, Anthropic, or OpenAI.
 - It is not intended to download or republish complete copyrighted videos or transcripts.
 
 ## How it works
 
-The project uses the transcript text available to it. Its helper script can request public caption data using `youtube-transcript-api` and video metadata through YouTube's oEmbed endpoint. User-provided transcript files can also be parsed. Temporary transcript data may be written to the execution environment's temporary directory; cleanup and retention depend on that environment.
+The project uses transcript text available to it. Its helper script can request public caption data using `youtube-transcript-api` and video metadata through YouTube's oEmbed endpoint. User-provided transcript files can also be parsed. Temporary transcript data may be written to the execution environment's temporary directory; cleanup and retention depend on that environment.
 
-The project does not currently include a developer-operated backend, user account database, analytics service, or advertising tracker. The host platform may separately process prompts, files, and outputs under its own terms and privacy policy.
+The current project code does not include a developer-operated backend, user account database, analytics service, or advertising tracker. The host platform may separately process prompts, files, and outputs under its own terms and privacy policy.
 
 ## Getting started
 
@@ -46,14 +48,16 @@ For developers, see the project files and the skill documentation in this reposi
 
 ## Responsible use
 
-Respect copyright, platform terms, privacy, and access controls. Only provide transcript material you are allowed to use. Do not use the project to bypass restrictions or to expose private information. Summaries and timestamps are aids for navigating source material, not substitutes for checking it.
+Respect copyright, platform terms, privacy, and access controls. Only provide transcript material you are allowed to use. Do not use the project to bypass restrictions or expose private information. Summaries and timestamps are aids for navigating source material, not substitutes for checking it.
 
 ## Project details
 
 - **Project name:** tubeGPT
-- **Developer display name:** Manas D (preferred project label; public publisher identity remains subject to platform verification)
+- **Project maintainer:** Manas D (preferred project label; public publisher identity remains subject to platform verification)
+- **Development assistance:** Claude AI
+- **Concept inspiration:** AskAVideo
 - **Distribution intention:** Free; worldwide, subject to platform availability and applicable laws
-- **Affiliation:** Independent project; not affiliated with YouTube or Google
+- **Affiliation:** Independent project; not affiliated with AskAVideo, YouTube, Google, Anthropic, or OpenAI
 
 ## License
 

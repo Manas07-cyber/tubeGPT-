@@ -4,6 +4,8 @@
 
 tubeGPT is an independent ChatGPT project for summarizing, explaining, searching, and navigating YouTube transcript text with timestamp references where available.
 
+The idea was inspired by AskAVideo. tubeGPT was independently implemented with Claude AI used as a development assistant. It is not affiliated with or endorsed by AskAVideo, YouTube, Google, Anthropic, or OpenAI.
+
 ## Explore
 
 - [About tubeGPT](about.html)
@@ -16,6 +18,4 @@ tubeGPT is an independent ChatGPT project for summarizing, explaining, searching
 
 tubeGPT relies on captions/transcript text that can be accessed or supplied. Captions may be missing, incomplete, or inaccurate. Always verify important information against the original video.
 
-tubeGPT is an independent project and is not affiliated with or endorsed by YouTube or Google.
-
-**Project status:** Public documentation is being prepared. Platform listing and availability are not yet confirmed.
+**Project status:** Public documentation is available. Platform listing and availability are not yet confirmed.

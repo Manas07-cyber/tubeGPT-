@@ -2,6 +2,12 @@
 
 tubeGPT is an independent project intended to make educational and informational YouTube videos easier to study through their transcript text.
 
+## Inspiration and development
+
+The idea for tubeGPT was inspired by AskAVideo. The tubeGPT implementation was built independently with Claude AI used as a development assistant. AskAVideo is acknowledged as inspiration only; tubeGPT is not affiliated with, sponsored by, or endorsed by AskAVideo.
+
+Claude is an AI development tool and is not represented as the project's publisher or maintainer. The project maintainer is responsible for the project and its public documentation.
+
 ## Main capabilities
 
 - Summarize transcript content.
@@ -15,9 +21,9 @@ tubeGPT is an independent project intended to make educational and informational
 
 tubeGPT is designed to ground its answers in transcript content. A video title, description, or guess is not a substitute for an actual transcript. If usable captions are unavailable, the project should make that limitation clear.
 
-## Independence
+## Independence and trademarks
 
-tubeGPT is developed independently. It is not affiliated with, sponsored by, or endorsed by YouTube, Google, or OpenAI. Product and service names belong to their respective owners.
+tubeGPT is an independent project. It is not affiliated with, sponsored by, or endorsed by AskAVideo, YouTube, Google, Anthropic, or OpenAI. Product and service names and marks belong to their respective owners.
 
 ## Availability
 

@@ -4,9 +4,9 @@
 
 These terms describe the intended use of tubeGPT, an independent project for working with YouTube transcript text. By using the project, you agree to follow these terms and the applicable terms of the host platform and third-party services.
 
-## 1. Project and affiliation
+## 1. Project, inspiration, and affiliation
 
-tubeGPT is an independent project. It is not affiliated with, sponsored by, or endorsed by YouTube, Google, or OpenAI. Their names and marks belong to their respective owners.
+The idea for tubeGPT was inspired by AskAVideo. tubeGPT was independently implemented with Claude AI used as a development assistant. It is not affiliated with, sponsored by, or endorsed by AskAVideo, YouTube, Google, Anthropic, or OpenAI. Their names and marks belong to their respective owners.
 
 ## 2. Eligibility
 
@@ -35,7 +35,7 @@ You are responsible for checking important information against the original vide
 
 ## 6. Third-party services
 
-Use of tubeGPT through ChatGPT or requests to YouTube/Google may be subject to separate third-party terms, policies, and technical limitations. Those services are not controlled by the project developer.
+Use of tubeGPT through ChatGPT or requests to YouTube/Google may be subject to separate third-party terms, policies, and technical limitations. Those services are not controlled by the project developer. Claude AI was used as a development assistant; it is not a service integrated into the current user-facing transcript workflow.
 
 ## 7. Changes and availability
 

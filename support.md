@@ -2,6 +2,10 @@
 
 Thanks for trying tubeGPT. This page explains how to report a problem or ask a project question.
 
+## Project background
+
+The tubeGPT idea was inspired by AskAVideo and the project was independently implemented with Claude AI used as a development assistant. tubeGPT is not affiliated with AskAVideo, YouTube, Google, Anthropic, or OpenAI.
+
 ## Report a bug or request a feature
 
 Open an issue in the [tubeGPT GitHub repository](https://github.com/Manas07-cyber/tubeGPT-/issues).

@@ -6,10 +6,10 @@ tubeGPT is an independent ChatGPT project for summarizing, explaining, searching
 
 ## Explore
 
-- [About tubeGPT](about.md)
-- [Privacy Policy](privacy.md)
-- [Terms of Use](terms.md)
-- [Support](support.md)
+- [About tubeGPT](about.html)
+- [Privacy Policy](privacy.html)
+- [Terms of Use](terms.html)
+- [Support](support.html)
 - [Source code on GitHub](https://github.com/Manas07-cyber/tubeGPT-)
 
 ## Important

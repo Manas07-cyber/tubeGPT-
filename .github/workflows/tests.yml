@@ -4,13 +4,15 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
   pytest:
-    runs-on: ubuntu-latest
+    # pinned so Python 3.9 stays available; ubuntu-latest no longer ships it
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -29,3 +31,19 @@ jobs:
         run: python -m compileall -q skills tests
       - name: Run tests
         run: python -m pytest -q
+
+  # Manual smoke test only (Actions tab -> tests -> Run workflow). Makes ONE normal caption
+  # request for one public video, no cookies or credentials. Never runs on push or pull request.
+  live-fetch:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -r requirements.txt
+      - name: Fetch one public transcript
+        run: |
+          python skills/youtube-conversation/scripts/transcript.py fetch "https://youtu.be/dQw4w9WgXcQ" --out "$RUNNER_TEMP/live.json"
+          python skills/youtube-conversation/scripts/transcript.py show "$RUNNER_TEMP/live.json" --stats

@@ -11,7 +11,7 @@ Answer questions about a YouTube video from what is actually said in it, and, wh
 2. **Make claims checkable.** When the transcript has timing data, each point comes with a timestamp link that lands on the exact second. Plain pasted text without timestamps cannot give real timestamp links, so say that once and do not invent times.
 3. **No fallback.** If the transcript cannot be read, say so plainly. A confident answer built on a guess is worse than no answer, because the user cannot tell the difference.
 
-All commands below use the helper `scripts/transcript.py` in this skill's folder. Run them from that folder (or give the full path to the script), and use `python3` if `python` is not found.
+All commands below use the helper `scripts/transcript.py`. It sits in the `scripts` folder right next to this SKILL.md file, so there is no need to search the file system for it. Run the commands from this skill's folder (the folder that contains this SKILL.md), or give the full path to the script, and use `python3` if `python` is not found.
 
 ## Workflow
 
@@ -20,6 +20,8 @@ All commands below use the helper `scripts/transcript.py` in this skill's folder
 Find the YouTube URL (or 11-character ID) in the user's message. If there is none, ask for the link. If they give several videos, handle them one at a time, since each needs its own transcript.
 
 ### 2. Get the transcript
+
+**Run `fetch` first**, as soon as you have the video link. Do not web-search or browse for the video, its transcript or a summary before this command has run and you have read its exit code. If you cannot run commands at all, say so and go to the paste option below.
 
 ```bash
 python scripts/transcript.py fetch "<url>"
@@ -31,8 +33,8 @@ On success it prints the video details and saves the transcript, so later questi
 |---|---|---|
 | 0 | Transcript saved | Go to step 3 |
 | 6 | Dependency missing | Create and activate a virtual environment at the plugin root, then, from this skill folder, run `python -m pip install -r ../../requirements.txt` (the one dependency list lives at the plugin root; see README.md), and rerun. Never use `sudo pip` or `--break-system-packages` |
-| 3 | Cannot reach YouTube from this environment (no internet access, or the sandbox blocks it) | Use one of the other ways below |
-| 5 | YouTube refused the request (cloud or VPN address, rate limit) | Use one of the other ways below. Running from the user's own computer usually avoids this |
+| 3 | Cannot reach YouTube from this environment (no internet access, or the sandbox blocks it) | Say in one short line that the script could not reach YouTube from here, then use one of the other ways below |
+| 5 | YouTube refused the request (cloud or VPN address, rate limit) | Say in one short line that YouTube refused the request, then use one of the other ways below. Running from the user's own computer usually avoids this |
 | 4 | The video has no readable captions (disabled, private, age-restricted, or none in that language) | Tell the user. If the error lists other languages, rerun with `--lang <code>`. Otherwise stop: do not answer from other sources |
 | 2 | No video ID found | Ask for a proper YouTube link |
 

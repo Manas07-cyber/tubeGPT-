@@ -1,6 +1,6 @@
 # tubeGPT
 
-**Explore YouTube video transcripts with summaries, searchable notes, and timestamped answers.**
+**Explore YouTube video transcripts with summaries, searchable notes, and timestamp links where timing data exists.**
 
 tubeGPT is an independently developed, skills-based ChatGPT project that helps users work with transcript text from YouTube videos. It uses available transcript content as its source and links answers to relevant video timestamps where possible.
 
@@ -14,7 +14,7 @@ tubeGPT is an independently developed, skills-based ChatGPT project that helps u
 - Works with transcript text supplied by the user, including SRT, VTT, and plain-text formats.
 - Summarizes and explains transcript content.
 - Finds topics, terms, and relevant sections in the transcript.
-- Produces timestamp links when the transcript includes usable timing information.
+- Produces timestamp links when the transcript includes usable timing information. Plain pasted text without timestamps cannot provide real video timestamp references, and not every answer will include one.
 - Says when transcript content is unavailable rather than inventing what a video contains.
 
 ## What it does not promise

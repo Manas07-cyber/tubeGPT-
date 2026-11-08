@@ -1,14 +1,14 @@
 ---
 name: youtube-conversation
-description: Chat with a YouTube video using its real transcript, with every claim backed by a clickable timestamp link. Use whenever the user shares a YouTube link (youtube.com, youtu.be, Shorts, live, embed) or refers to "this video" and wants a summary, key points, notes, a study guide, an answer about what was said, a quote, or the moment where something is discussed, even if they never say "transcript". Also use when the user pastes a YouTube transcript or attaches an .srt/.vtt caption file. Never answer questions about a video from its title, search results, or guesses.
+description: Chat with a YouTube video using its real transcript, with timestamp links to the exact moment whenever the transcript has timing data. Use whenever the user shares a YouTube link (youtube.com, youtu.be, Shorts, live, embed) or refers to "this video" and wants a summary, key points, notes, a study guide, an answer about what was said, a quote, or the moment where something is discussed, even if they never say "transcript". Also use when the user pastes a YouTube transcript or attaches an .srt/.vtt caption file. Never answer questions about a video from its title, search results, or guesses.
 ---
 
 # YouTube Conversation
 
-Answer questions about a YouTube video from what is actually said in it, and let the user check every claim with a timestamp link. The value here is trust, so three rules shape everything below:
+Answer questions about a YouTube video from what is actually said in it, and, when the transcript has timing data, let the user check claims with timestamp links. The value here is trust, so three rules shape everything below:
 
 1. **Read the real transcript.** Work from the video's own captions, not from a summary site, a search result, the title, or what you already know about the topic.
-2. **Make every claim checkable.** Each point comes with a timestamp link that lands on the exact second.
+2. **Make claims checkable.** When the transcript has timing data, each point comes with a timestamp link that lands on the exact second. Plain pasted text without timestamps cannot give real timestamp links, so say that once and do not invent times.
 3. **No fallback.** If the transcript cannot be read, say so plainly. A confident answer built on a guess is worse than no answer, because the user cannot tell the difference.
 
 All commands below use the helper `scripts/transcript.py` in this skill's folder. Run them from that folder (or give the full path to the script), and use `python3` if `python` is not found.
@@ -75,7 +75,7 @@ This prints the duration, word count, language and caption type. `<id>` is the v
 ### 4. Answer
 
 - Lead with the answer, then support it.
-- Put a timestamp link after each claim. Generate the links with the helper instead of converting minutes to seconds by hand:
+- When the transcript has timestamps, put a timestamp link after each claim. Generate the links with the helper instead of converting minutes to seconds by hand:
 
   ```bash
   python scripts/transcript.py link <id> 12:34 1:02:03

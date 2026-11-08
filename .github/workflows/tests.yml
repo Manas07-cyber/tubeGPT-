@@ -48,23 +48,80 @@ jobs:
           python skills/youtube-conversation/scripts/transcript.py fetch "https://youtu.be/dQw4w9WgXcQ" --out "$RUNNER_TEMP/live.json"
           python skills/youtube-conversation/scripts/transcript.py show "$RUNNER_TEMP/live.json" --stats
 
-  # Manual check only: requests the five public documentation pages and fails on any non-200 status,
-  # then checks every same-site link found on the About page.
+  # Manual check only (never runs on push or pull request): requests the five public documentation pages and
+  # requires HTTP 200 for each, then checks every same-site link found on those pages (relative links are
+  # resolved against the page they appear on). Redirects are followed; any failure fails the job.
   pages-check:
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      PAGES_BASE: https://manas07-cyber.github.io/tubeGPT-/
+      REPO_URL_PREFIX: https://github.com/Manas07-cyber/tubeGPT-
     steps:
-      - name: Check public pages
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Check public pages and links
         run: |
-          base="https://manas07-cyber.github.io/tubeGPT-"
-          fail=0
-          for p in "" about.html privacy.html terms.html support.html; do
-            code=$(curl -s -o /dev/null -w "%{http_code}" "$base/$p")
-            echo "$code $base/$p"
-            [ "$code" = "200" ] || fail=1
-          done
-          echo "--- links on about.html"
-          curl -s "$base/about.html" | grep -oE 'href="[^"]+"' | sed 's/href="//;s/"$//' | sort -u | while read -r l; do
-            case "$l" in "$base"*|https://github.com/Manas07-cyber/*) code=$(curl -sL -o /dev/null -w "%{http_code}" "$l"); echo "$code $l";; esac
-          done
-          exit $fail
+          python - <<'PY'
+          import os, sys, urllib.error, urllib.request
+          from html.parser import HTMLParser
+          from urllib.parse import urldefrag, urljoin
+
+          BASE = os.environ["PAGES_BASE"]
+          REPO = os.environ["REPO_URL_PREFIX"]
+          PAGES = ["", "about.html", "privacy.html", "terms.html", "support.html"]
+          TIMEOUT = 20
+
+          def get(url):
+              req = urllib.request.Request(url, headers={"User-Agent": "tubeGPT-pages-check"})
+              try:
+                  with urllib.request.urlopen(req, timeout=TIMEOUT) as r:  # follows redirects
+                      return r.status, r.read().decode("utf-8", "replace")
+              except urllib.error.HTTPError as e:
+                  return e.code, ""
+              except Exception as e:  # DNS failure, timeout, TLS error ...
+                  return "ERR " + type(e).__name__, ""
+
+          class Links(HTMLParser):
+              def __init__(self):
+                  super().__init__()
+                  self.hrefs = []
+              def handle_starttag(self, tag, attrs):
+                  for k, v in attrs:
+                      if k in ("href", "src") and v:
+                          self.hrefs.append(v)
+
+          failures = []
+          to_check = {}
+          for page in PAGES:
+              url = BASE + page
+              status, body = get(url)
+              print(f"{status} {url}")
+              if status != 200:
+                  failures.append(f"page {url} returned {status}")
+                  continue
+              parser = Links()
+              parser.feed(body)
+              for href in parser.hrefs:
+                  target, _ = urldefrag(urljoin(url, href.strip()))
+                  if target.startswith(("mailto:", "tel:", "javascript:")) or not target:
+                      continue
+                  if target.startswith(BASE) or target.startswith(REPO):
+                      to_check.setdefault(target, url)
+
+          print(f"--- {len(to_check)} same-site / repository links")
+          for target, source in sorted(to_check.items()):
+              status, _ = get(target)
+              print(f"{status} {target}  (found on {source})")
+              if status != 200:
+                  failures.append(f"link {target} (on {source}) returned {status}")
+
+          if failures:
+              print("\nFAILED:")
+              for f in failures:
+                  print(" - " + f)
+              sys.exit(1)
+          print("\nAll pages and links returned 200.")
+          PY

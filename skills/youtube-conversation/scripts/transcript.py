@@ -87,17 +87,23 @@ def to_seconds(ts: str) -> float:
     return nums[0]
 
 
+# Accepted user-typed times: seconds (754, 754.5), M:SS (12:34) and H:MM:SS (1:02:03). In the M:SS and
+# H:MM:SS forms the seconds (and, with hours, the minutes) must be 0-59; a comma may replace the decimal point.
+TIME_ARG_RE = re.compile(
+    r"^(?:(?P<sec_only>[0-9]+(?:\.[0-9]+)?)"
+    r"|(?P<m>[0-9]+):(?P<s>[0-5]?[0-9](?:\.[0-9]+)?)"
+    r"|(?P<h>[0-9]+):(?P<mm>[0-5]?[0-9]):(?P<ss>[0-5]?[0-9](?:\.[0-9]+)?))$"
+)
+
+
 def parse_time_arg(value: str) -> float:
-    try:
-        nums = [float(p) for p in value.strip().replace(",", ".").split(":")]
-        seconds = to_seconds(value)
-    except (ValueError, AttributeError):
-        die(f"Not a valid time: {value!r}. Use seconds (754), M:SS (12:34) or H:MM:SS (1:02:03).", EXIT_BAD_INPUT)
-    if any(n != n or n in (float("inf"), float("-inf")) for n in nums) or seconds != seconds:
-        die(f"Not a valid time: {value!r}. Use seconds (754), M:SS (12:34) or H:MM:SS (1:02:03).", EXIT_BAD_INPUT)
-    if seconds < 0 or any(n < 0 for n in nums):
+    text = value.strip().replace(",", ".") if isinstance(value, str) else ""
+    if re.search(r"(^|:)\s*-", text):
         die(f"Time cannot be negative: {value!r}", EXIT_BAD_INPUT)
-    return seconds
+    if not TIME_ARG_RE.match(text):
+        die(f"Not a valid time: {value!r}. Use seconds (754), M:SS (12:34) or H:MM:SS (1:02:03); "
+            "minutes and seconds must be below 60 when hours or minutes are given.", EXIT_BAD_INPUT)
+    return to_seconds(text)
 
 
 def fmt_time(seconds: float) -> str:

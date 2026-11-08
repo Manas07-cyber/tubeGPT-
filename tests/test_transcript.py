@@ -508,3 +508,57 @@ def test_requirements_hint_points_to_plugin_root_file(tr):
     if hint != "requirements.txt":
         from pathlib import Path
         assert Path(hint.strip('"')).is_file()
+
+
+# ---------------------------------------------------------------- strict time-argument validation
+@pytest.mark.parametrize("text,expected", [
+    ("0", 0), ("59", 59), ("60", 60), ("754", 754), ("754.5", 754.5), ("3600", 3600),   # plain seconds may exceed 59
+    ("0:00", 0), ("0:59", 59), ("1:00", 60), ("12:34", 754), ("75:30", 4530),            # M:SS, minutes unbounded
+    ("1:02:03", 3723), ("0:00:00", 0), ("0:59:59", 3599), ("10:00:00", 36000),           # H:MM:SS boundaries
+    ("0:01.500", 1.5), ("00:00:01,500", 1.5), ("00:00:01.500", 1.5), ("0:59.999", 59.999),  # fractional forms
+    ("  12:34  ", 754),
+])
+def test_parse_time_arg_valid_and_boundary_values(tr, text, expected):
+    assert tr.parse_time_arg(text) == pytest.approx(expected)
+
+
+@pytest.mark.parametrize("bad", [
+    "1:60", "0:60", "12:75", "1:99",                       # seconds out of range in M:SS
+    "1:02:60", "1:60:00", "1:60:30", "0:00:99",            # seconds or minutes out of range in H:MM:SS
+    "0:60.0", "1:02:59.5.5", "1:02:60,5",                  # out-of-range / malformed fractions
+    "1:2:3:4", "1::30", ":30", "1:", "::", "1.5:30",       # wrong shape
+    "abc", "", "  ", "nan", "inf", "Infinity", "1e3", "0x10", "٣:٠٠",  # not plain numbers (incl. non-ASCII digits)
+])
+def test_parse_time_arg_rejects_malformed(tr, bad):
+    with pytest.raises(SystemExit) as exc:
+        tr.parse_time_arg(bad)
+    assert exc.value.code == tr.EXIT_BAD_INPUT
+
+
+@pytest.mark.parametrize("neg", ["-1", "-0:30", "0:-30", "1:-02:03", "1:02:-3", "-inf", "-1.5", "-00:00:01,500"])
+def test_parse_time_arg_negative_gets_negative_message(tr, neg, capsys):
+    with pytest.raises(SystemExit) as exc:
+        tr.parse_time_arg(neg)
+    assert exc.value.code == tr.EXIT_BAD_INPUT and "negative" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("flag", ["--from", "--to"])
+@pytest.mark.parametrize("bad", ["1:60", "1:02:60"])
+def test_show_rejects_out_of_range_components(run, tmp_path, docs, flag, bad):
+    *_, path = parse_file(run, tmp_path, docs.SRT, "a.srt")
+    code, _, err = run("show", str(path), flag, bad)
+    assert code == 2 and "Not a valid time" in err
+
+
+@pytest.mark.parametrize("bad", ["1:60", "1:02:60"])
+def test_link_rejects_out_of_range_components(run, tmp_path, docs, bad):
+    *_, path = parse_file(run, tmp_path, docs.SRT, "a.srt")
+    code, out, err = run("link", str(path), bad)
+    assert code == 2 and "youtu.be" not in out
+
+
+def test_link_and_show_still_accept_boundary_times(run, tmp_path, docs):
+    *_, path = parse_file(run, tmp_path, docs.SRT, "a.srt")
+    code, out, _ = run("link", str(path), "0:59", "1:00", "0:59:59")
+    assert code == 0 and f"?t=59)" in out and f"?t=60)" in out and f"?t=3599)" in out
+    assert run("show", str(path), "--from", "0:59", "--to", "1:59")[0] == 0

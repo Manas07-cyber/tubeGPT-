@@ -2,7 +2,7 @@
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "tubeGPT",
   "version": "1.0.0",
-  "description": "Chat with a YouTube video using its real transcript. Summaries and answers come with timestamp links so every claim can be checked at the exact second.",
+  "description": "Chat with a YouTube video using its real transcript. Summaries and answers include timestamp links to the exact moment when the transcript has timing data.",
   "author": {
     "name": "Independent developer"
   },
@@ -19,7 +19,7 @@
       "interface": {
         "displayName": "tubeGPT",
         "shortDescription": "Ask videos, get timestamps",
-        "longDescription": "Ask questions about a YouTube video and get answers built from what is actually said in it. The skill reads the video's own captions, then summarizes, extracts key points or finds a specific moment, and attaches a timestamp link to every claim so you can jump straight to that second.\n\nIt works only from a real transcript. If captions cannot be read, it says so instead of guessing, and you can paste the transcript text or attach a caption file (.srt, .vtt, .txt) instead. Videos without captions cannot be read.\n\nThis is an independent skill and is not affiliated with or endorsed by YouTube or Google.",
+        "longDescription": "Ask questions about a YouTube video and get answers built from what is actually said in it. The skill reads the video's own captions, then summarizes, extracts key points or finds a specific moment, and, when the transcript has timing data, attaches timestamp links so you can jump straight to that second. Plain pasted text without timestamps cannot provide real timestamp links.\n\nIt works only from a real transcript. If captions cannot be read, it says so instead of guessing, and you can paste the transcript text or attach a caption file (.srt, .vtt, .txt) instead. Videos without captions cannot be read.\n\nThis is an independent skill and is not affiliated with or endorsed by YouTube or Google.",
         "developerName": "Independent developer",
         "category": "Productivity",
         "capabilities": [

@@ -1,0 +1,41 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "tubeGPT",
+  "version": "1.0.0",
+  "description": "Chat with a YouTube video using its real transcript. Summaries and answers come with timestamp links so every claim can be checked at the exact second.",
+  "author": {
+    "name": "Independent developer"
+  },
+  "keywords": [
+    "youtube",
+    "transcript",
+    "video",
+    "summary",
+    "timestamps",
+    "study"
+  ],
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "tubeGPT",
+        "shortDescription": "Ask videos, get timestamps",
+        "longDescription": "Ask questions about a YouTube video and get answers built from what is actually said in it. The skill reads the video's own captions, then summarizes, extracts key points or finds a specific moment, and attaches a timestamp link to every claim so you can jump straight to that second.\n\nIt works only from a real transcript. If captions cannot be read, it says so instead of guessing, and you can paste the transcript text or attach a caption file (.srt, .vtt, .txt) instead. Videos without captions cannot be read.\n\nThis is an independent skill and is not affiliated with or endorsed by YouTube or Google.",
+        "developerName": "Independent developer",
+        "category": "Productivity",
+        "capabilities": [
+          "Read YouTube transcripts",
+          "Answer with timestamp links",
+          "Summarize videos"
+        ],
+        "defaultPrompt": [
+          "Summarize this YouTube video and link each point to its timestamp.",
+          "Find where the video explains the main idea and link me to that moment.",
+          "Turn this lecture video into study notes with timestamp links."
+        ],
+        "brandColor": "#0F766E",
+        "composerIcon": "./assets/icon.png",
+        "logo": "./assets/logo.png"
+      }
+    }
+  }
+}

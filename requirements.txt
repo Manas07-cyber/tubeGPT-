@@ -1,0 +1,3 @@
+# Runtime dependency of skills/youtube-conversation/scripts/transcript.py ("fetch" command only).
+# Version 1.0+ is required (the script uses YouTubeTranscriptApi().list() and .fetch()).
+youtube-transcript-api>=1.0.0,<2

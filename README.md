@@ -39,6 +39,49 @@ The current project code does not include a developer-operated backend, user acc
 
 For developers, see the project files and the skill documentation in this repository. Dependencies and platform requirements may change; consult the source before running scripts.
 
+### Developer setup
+
+Requirements: Python 3.9 or newer. Run these commands from the repository root (the folder that contains `requirements.txt`). Use a standard virtual environment; no administrator rights are needed, and `sudo pip` or `--break-system-packages` should never be used.
+
+Windows PowerShell:
+
+```powershell
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+```
+
+Linux / macOS:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+```
+
+Leave the environment with `deactivate`; delete the `.venv` folder to remove it. If PowerShell blocks `Activate.ps1`, run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`, or use `.venv\Scripts\activate.bat` in Command Prompt.
+
+Example commands (from the repository root):
+
+```bash
+python skills/youtube-conversation/scripts/transcript.py fetch "https://youtu.be/VIDEO_ID"
+python skills/youtube-conversation/scripts/transcript.py show VIDEO_ID --stats
+python skills/youtube-conversation/scripts/transcript.py search VIDEO_ID "some term"
+python skills/youtube-conversation/scripts/transcript.py link VIDEO_ID 12:34
+python skills/youtube-conversation/scripts/transcript.py parse captions.srt --video "https://youtu.be/VIDEO_ID"
+```
+
+Only `fetch` needs internet access. The skill's own instructions run the same script from `skills/youtube-conversation/`, where the dependency file is `../../requirements.txt`.
+
+### Run the tests
+
+```bash
+python -m pip install -r requirements-dev.txt
+python -m pytest
+```
+
+The tests use mock data and temporary folders only. They make no network requests and need no credentials. Transcript files written by `fetch`/`parse` go to your system temp folder under `youtube-conversation/` (or the path given with `--out`) and are not deleted automatically.
+
 ## Documentation
 
 - [About tubeGPT](about.md)

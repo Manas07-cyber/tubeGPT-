@@ -29,4 +29,4 @@ tubeGPT is an independent project. It is not affiliated with, sponsored by, or e
 
 The project is intended to be free and usable worldwide where the host platform, video access, and applicable law permit. No guarantee is made that every video or region will be supported.
 
-See the [README](README.md), [Privacy Policy](privacy.md), [Terms of Use](terms.md), and [Support](support.md).
+See the [README](https://github.com/Manas07-cyber/tubeGPT-/blob/main/README.md), [Privacy Policy](privacy.md), [Terms of Use](terms.md), and [Support](support.md).

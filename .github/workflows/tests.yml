@@ -47,3 +47,24 @@ jobs:
         run: |
           python skills/youtube-conversation/scripts/transcript.py fetch "https://youtu.be/dQw4w9WgXcQ" --out "$RUNNER_TEMP/live.json"
           python skills/youtube-conversation/scripts/transcript.py show "$RUNNER_TEMP/live.json" --stats
+
+  # Manual check only: requests the five public documentation pages and fails on any non-200 status,
+  # then checks every same-site link found on the About page.
+  pages-check:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check public pages
+        run: |
+          base="https://manas07-cyber.github.io/tubeGPT-"
+          fail=0
+          for p in "" about.html privacy.html terms.html support.html; do
+            code=$(curl -s -o /dev/null -w "%{http_code}" "$base/$p")
+            echo "$code $base/$p"
+            [ "$code" = "200" ] || fail=1
+          done
+          echo "--- links on about.html"
+          curl -s "$base/about.html" | grep -oE 'href="[^"]+"' | sed 's/href="//;s/"$//' | sort -u | while read -r l; do
+            case "$l" in "$base"*|https://github.com/Manas07-cyber/*) code=$(curl -sL -o /dev/null -w "%{http_code}" "$l"); echo "$code $l";; esac
+          done
+          exit $fail

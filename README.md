@@ -73,6 +73,14 @@ python skills/youtube-conversation/scripts/transcript.py parse captions.srt --vi
 
 Only `fetch` needs internet access. The skill's own instructions run the same script from `skills/youtube-conversation/`, where the dependency file is `../../requirements.txt`.
 
+### Common environment problems
+
+- `python` or `python3` not found: install Python 3.9 or newer from python.org (or your system package manager) and reopen the terminal. On Windows the launcher `py -3 -m venv .venv` also works.
+- `Activate.ps1 cannot be loaded` (PowerShell): see the execution-policy note above.
+- `No such file or directory: requirements.txt`: you are not in the repository root. `cd` into the folder that contains `requirements.txt` first.
+- `externally-managed-environment`: this means you are installing outside a virtual environment. Activate `.venv` and run `python -m pip install -r requirements.txt` again; do not override the protection.
+- Packages installed in the wrong place: check that your prompt shows `(.venv)` and that `python -m pip --version` points inside the `.venv` folder.
+
 ### Run the tests
 
 ```bash

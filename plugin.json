@@ -1,6 +1,6 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
-  "name": "tubeGPT",
+  "name": "tubegpt",
   "version": "1.0.0",
   "description": "Chat with a YouTube video using its real transcript. Summaries and answers include timestamp links to the exact moment when the transcript has timing data.",
   "author": {

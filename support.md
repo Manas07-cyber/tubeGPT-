@@ -24,6 +24,7 @@ When reporting a problem, include:
 - Try another video with publicly available captions.
 - If you have permission to use the transcript, try a supported transcript file.
 - Remember that auto-generated captions may contain errors.
+- If you run the helper script yourself, add `-v` before the command (for example `transcript.py -v show VIDEO_ID`) to get diagnostic logs. They never contain transcript text, but still check them for personal information before posting.
 
 ## Protect your privacy
 

@@ -21,6 +21,8 @@ def tr():
 def isolated_tmp(tr, tmp_path, monkeypatch):
     """Every test saves transcripts inside its own temp dir, never the real one."""
     store = tmp_path / "store"
+    for name in ("TUBEGPT_STORAGE_DIR", "TUBEGPT_RETENTION_HOURS", "TUBEGPT_MAX_STORE_MB", "TUBEGPT_MAX_FILES"):
+        monkeypatch.delenv(name, raising=False)  # a developer's own settings must not leak into tests
     monkeypatch.setattr(tr, "default_dir", lambda: store)
     # ordinary tests must never touch the network
     monkeypatch.setattr(tr, "try_oembed", lambda vid: ("Mock title", "Mock channel"))

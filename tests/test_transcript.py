@@ -318,7 +318,8 @@ def test_unknown_command_is_argparse_error(run):
 
 # ---------------------------------------------------------------- file handling / temp cleanup
 def test_default_dir_is_under_system_tempdir(tr, monkeypatch):
-    import importlib.util, tempfile
+    import importlib.util
+    import tempfile
     spec = importlib.util.spec_from_file_location("fresh", tr.__file__)
     fresh = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(fresh)
@@ -475,7 +476,8 @@ def test_fetch_failure_writes_nothing(run, monkeypatch, isolated_tmp):
 
 
 def test_oembed_failure_never_breaks_fetch(tr, monkeypatch):
-    import importlib.util, urllib.request
+    import importlib.util
+    import urllib.request
     spec = importlib.util.spec_from_file_location("fresh2", tr.__file__)
     fresh = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(fresh)
@@ -487,7 +489,8 @@ def test_oembed_failure_never_breaks_fetch(tr, monkeypatch):
 
 
 def test_oembed_only_contacts_youtube(tr, monkeypatch):
-    import importlib.util, urllib.request
+    import importlib.util
+    import urllib.request
     spec = importlib.util.spec_from_file_location("fresh3", tr.__file__)
     fresh = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(fresh)
@@ -560,5 +563,5 @@ def test_link_rejects_out_of_range_components(run, tmp_path, docs, bad):
 def test_link_and_show_still_accept_boundary_times(run, tmp_path, docs):
     *_, path = parse_file(run, tmp_path, docs.SRT, "a.srt")
     code, out, _ = run("link", str(path), "0:59", "1:00", "0:59:59")
-    assert code == 0 and f"?t=59)" in out and f"?t=60)" in out and f"?t=3599)" in out
+    assert code == 0 and "?t=59)" in out and "?t=60)" in out and "?t=3599)" in out
     assert run("show", str(path), "--from", "0:59", "--to", "1:59")[0] == 0

@@ -24,7 +24,9 @@ Please do not provide confidential, sensitive, or personal information unless yo
 
 The helper script can request public caption data using the `youtube-transcript-api` library and request video metadata using YouTube's oEmbed endpoint. It can also parse transcript text supplied by the user.
 
-The inspected project code writes transcript-related working data to a temporary directory in the execution environment. The project does not define its own guaranteed deletion schedule. Cleanup and retention depend on the host environment and its configuration.
+The inspected project code writes transcript-related working data (the transcript text, timing, language, and the video's public title and channel) to a folder named `youtube-conversation` inside the execution environment's temporary directory, or to the folder named by the `TUBEGPT_STORAGE_DIR` setting. The folder and files are created readable only by the user running the script where the operating system supports it.
+
+By default, saved transcripts in that folder that have not been used for 24 hours are deleted, and the oldest are deleted when the folder exceeds 200 MB or 500 files. These limits can be changed with the `TUBEGPT_RETENTION_HOURS`, `TUBEGPT_MAX_STORE_MB`, and `TUBEGPT_MAX_FILES` settings. This cleanup runs when the helper script next saves a transcript or when its `cleanup` command is run; it is not a background timer, so files can remain longer if the script is not run again. Files saved to a location you choose with `--out` are never deleted by the script. Deletion by the script does not control copies kept by the host platform, backups, or logs, and the project cannot guarantee when or whether the host environment itself removes data.
 
 The inspected project code does not contain a developer-operated backend, developer-owned transcript database, analytics service, advertising tracker, or developer-controlled endpoint for collecting transcript content. This description may change if the software is updated; check the repository's current source and release notes.
 

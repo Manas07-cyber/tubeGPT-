@@ -1,16 +1,15 @@
 """Dependency declarations must match what the code really imports, with bounded versions."""
 import ast
+import importlib.util
 import re
 import sys
+import sysconfig
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "skills" / "youtube-conversation" / "scripts" / "transcript.py"
-# sys.stdlib_module_names exists from Python 3.10; this is the same information for 3.9.
-FALLBACK_STDLIB = {"__future__", "argparse", "bisect", "errno", "hashlib", "html", "http", "json", "logging",
-                   "math", "os", "re", "sys", "tempfile", "time", "pathlib", "urllib"}
 IMPORT_TO_DIST = {"youtube_transcript_api": "youtube-transcript-api", "requests": "requests"}
 
 
@@ -30,9 +29,37 @@ def top_level_imports(path):
     return found
 
 
+def is_stdlib_by_location(name):
+    """Stdlib check that also works on Python 3.9 (no sys.stdlib_module_names): look at where the module lives."""
+    spec = importlib.util.find_spec(name)
+    if spec is None:
+        return False                                  # not installed at all: treat as a third-party package
+    origin = spec.origin or ""
+    if origin in ("built-in", "frozen"):
+        return True
+    path = Path(origin).resolve()
+    stdlib = Path(sysconfig.get_path("stdlib")).resolve()
+    return stdlib in path.parents and not ({"site-packages", "dist-packages"} & set(path.parts))
+
+
+def is_stdlib(name):
+    names = getattr(sys, "stdlib_module_names", None)    # available from Python 3.10
+    return name in names if names is not None else is_stdlib_by_location(name)
+
+
 def third_party(modules):
-    stdlib = getattr(sys, "stdlib_module_names", None) or FALLBACK_STDLIB
-    return {m for m in modules if m not in stdlib}
+    return {m for m in modules if not is_stdlib(m)}
+
+
+@pytest.mark.parametrize("name", ["ast", "io", "shutil", "importlib", "types", "json", "os", "re", "argparse",
+                                  "tempfile", "urllib", "http", "logging", "__future__"])
+def test_stdlib_detection_fallback_recognises_standard_modules(name):
+    assert is_stdlib_by_location(name), f"{name} should be recognised as standard library"
+
+
+@pytest.mark.parametrize("name", ["pytest", "packaging", "not_an_installed_package_xyz"])
+def test_stdlib_detection_fallback_does_not_treat_third_party_as_stdlib(name):
+    assert not is_stdlib_by_location(name)
 
 
 def test_runtime_imports_are_declared_or_knowingly_optional():

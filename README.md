@@ -26,7 +26,7 @@ tubeGPT is an independently developed, skills-based ChatGPT project that helps u
 
 ## How it works
 
-The project uses transcript text available to it. Its helper script can request public caption data using `youtube-transcript-api` and video metadata through YouTube's oEmbed endpoint. User-provided transcript files can also be parsed. Temporary transcript data may be written to the execution environment's temporary directory; cleanup and retention depend on that environment.
+The project uses transcript text available to it. Its helper script can request public caption data using `youtube-transcript-api` and video metadata through YouTube's oEmbed endpoint. User-provided transcript files can also be parsed. Saved transcripts are written to a private folder in the execution environment's temporary directory and are removed automatically when unused for 24 hours by default (see [Storage and retention](#storage-and-retention)); the host environment may retain data separately.
 
 The current project code does not include a developer-operated backend, user account database, analytics service, or advertising tracker. The host platform may separately process prompts, files, and outputs under its own terms and privacy policy.
 
@@ -59,6 +59,14 @@ source .venv/bin/activate
 python -m pip install -r requirements.txt
 ```
 
+For a reproducible install that uses the exact dependency versions CI tests, add the constraints file (`constraints.txt`; it pins `youtube-transcript-api`, its dependencies and the linter, with `requests`/`urllib3` pinned per Python version):
+
+```bash
+python -m pip install -r requirements-dev.txt -c constraints.txt
+```
+
+Normal installs use `requirements.txt` alone and therefore receive newer compatible releases, including security fixes. The pins are a snapshot that CI proves works on Python 3.9, 3.11 and 3.13; they are refreshed manually.
+
 Leave the environment with `deactivate`; delete the `.venv` folder to remove it. If PowerShell blocks `Activate.ps1`, run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`, or use `.venv\Scripts\activate.bat` in Command Prompt.
 
 Example commands (from the repository root):
@@ -88,7 +96,53 @@ python -m pip install -r requirements-dev.txt
 python -m pytest
 ```
 
-The tests use mock data and temporary folders only. They make no network requests and need no credentials. Transcript files written by `fetch`/`parse` go to your system temp folder under `youtube-conversation/` (or the path given with `--out`) and are not deleted automatically.
+The tests use mock data and temporary folders only. They make no network requests and need no credentials. One optional test talks to the real YouTube; it is skipped unless you ask for it:
+
+```bash
+TUBEGPT_RUN_INTEGRATION=1 python -m pytest -m integration -v -rs     # Linux / macOS
+$env:TUBEGPT_RUN_INTEGRATION = "1"; python -m pytest -m integration -v -rs   # PowerShell
+```
+
+If YouTube is unreachable or refuses the request, that test is reported as skipped with the reason; ordinary test runs never depend on YouTube.
+
+Contributors also run the linter and the same checks as CI:
+
+```bash
+python -m ruff check .
+python -m compileall -q skills tests
+python -m pip check
+python -m pytest -q tests/test_manifests.py tests/test_dependencies.py tests/test_repo_hygiene.py tests/test_docs.py
+```
+
+GitHub Actions (`.github/workflows/tests.yml`) runs on every push to `main` and every pull request, on Python 3.9, 3.11 and 3.13, with read-only permissions: dependency install from `constraints.txt` and `pip check`, compilation, `ruff` (style, bugbear and security rules), manifest validation, repository security checks (secret patterns, forbidden files, no shell/subprocess/`eval`, only YouTube hosts), documentation link and consistency checks, and the full test suite. Three further jobs run only when started by hand from the Actions tab and never on push or pull request, so ordinary CI never depends on YouTube, GitHub Pages or a vulnerability database being reachable: `live-fetch` (one real transcript fetch), `pages-check` (the public pages and their links) and `dependency-audit` (`pip-audit` on the runtime dependencies).
+
+## Storage and retention
+
+`fetch` and `parse` save a transcript as JSON so later `show`, `search` and `link` calls do not need to fetch it again.
+
+- **Where:** `youtube-conversation/` inside the system temp folder, or the folder in `TUBEGPT_STORAGE_DIR`. It is created owner-only (mode 700) where supported; a folder that is a symbolic link or belongs to another user is refused. Files are named after the video ID (`<id>.json`) or `pasted-<hash>.json`.
+- **Retention:** a stored transcript is deleted once it has not been used (saved or read) for `TUBEGPT_RETENTION_HOURS` hours (default 24, range 0.1 to 8760).
+- **Limits:** when the folder exceeds `TUBEGPT_MAX_STORE_MB` megabytes (default 200) or `TUBEGPT_MAX_FILES` files (default 500), the oldest files are deleted first.
+- **When cleanup runs:** automatically before each save to the default folder, and on demand with `python skills/youtube-conversation/scripts/transcript.py cleanup` (`--dry-run` shows what would be removed). There is no background process, so files stay until the next run.
+- **Safety rules:** cleanup only touches regular files directly inside the storage folder whose names this tool generates; it never follows symbolic links, never recurses, and never deletes a file used in the last 5 minutes. A folder you choose with `TUBEGPT_STORAGE_DIR` is only cleaned if the tool created it (or found it empty) and marked it, so your own files are safe. Files written with `--out` are yours and are never deleted.
+- **Writes are atomic:** a private temporary file is renamed into place, so a crash or a full disk never leaves a half-written transcript. A full or unwritable disk gives a clear message and exit code 7.
+
+## Input validation and limits
+
+Saved transcripts are fully validated when loaded (types, required fields, finite non-negative timestamps, end after start, start times in order). A malformed file gives a clear error and exit code 2, never a crash. Other limits: input files up to 50 MB, saved transcripts up to 100 MB and 500,000 segments, search terms up to 500 characters (50 per search), 200 times per `link` call, `--max` 1 to 1000, `--context` 0 to 50, `--max-chars` 1 to 1,000,000, and times of at most 10,000,000 seconds. Minutes and seconds must be below 60 in `M:SS` and `H:MM:SS` times.
+
+## Logging and exit codes
+
+Add `-v` before the command (for example `python skills/youtube-conversation/scripts/transcript.py -v show VIDEO_ID`) to print structured debug lines to stderr. Logs never contain transcript text. Exit codes: 0 ok, 1 unexpected error, 2 bad input, 3 cannot reach YouTube, 4 no readable transcript, 5 YouTube refused the request, 6 missing or outdated dependency, 7 storage unavailable or full.
+
+## Known limitations
+
+- Fetching depends on the third-party, unofficial `youtube-transcript-api` package and on YouTube allowing the request; it often fails from cloud, VPN or shared addresses. Pasting a transcript or caption file always works.
+- Videos without captions cannot be read. Auto-generated captions can misspell names and terms.
+- Plain pasted text without timestamps cannot give real video timestamps, and not every answer will include a timestamp link.
+- Rolling auto-caption repeats are detected by timing and line overlap. Unusual files may keep a repeated line, and an unusually timed genuine repeat in a multi-line rolling window may be dropped.
+- Cleanup is opportunistic (see above), not a scheduled job. Nothing here can control what the host platform keeps.
+- The tool reads and writes JSON transcripts only; it has no subtitle export command.
 
 ## Documentation
 

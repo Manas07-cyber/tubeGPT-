@@ -1,0 +1,16 @@
+# Exact versions that CI installs, so builds are reproducible. Use it with a requirements file, for example:
+#   python -m pip install -r requirements-dev.txt -c constraints.txt
+# Normal users install from requirements.txt alone and so receive newer compatible releases (including
+# security fixes). Refresh these pins from time to time; CI proves they install on Python 3.9, 3.11 and 3.13.
+# requests/urllib3 are pinned per Python version because their newest releases need Python 3.10 or newer.
+youtube-transcript-api==1.2.5
+defusedxml==0.7.1
+certifi==2026.10.23
+charset-normalizer==3.5.2
+idna==3.20
+requests==2.32.5; python_version < "3.10"
+urllib3==2.6.3; python_version < "3.10"
+requests==2.34.2; python_version >= "3.10"
+urllib3==2.8.0; python_version >= "3.10"
+# Linter used by CI (pinned so new lint rules never break the build unexpectedly).
+ruff==0.16.9

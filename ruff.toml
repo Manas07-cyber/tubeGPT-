@@ -1,0 +1,14 @@
+# Lint configuration for tubeGPT. Run: python -m ruff check .
+target-version = "py39"          # the oldest Python version the project supports
+line-length = 120
+extend-exclude = ["assets"]
+
+[lint]
+# E/W: pycodestyle, F: pyflakes, B: bugbear (likely bugs), S: bandit-style security checks
+select = ["E", "F", "W", "B", "S"]
+
+[lint.per-file-ignores]
+# Tests use bare asserts, fixed temporary paths and throwaway fixture values by design.
+"tests/*" = ["S101", "S105", "S106", "S108", "S311", "E501"]   # E501: long caption/JSON sample strings
+# Realistic YouTube rolling-caption samples contain whitespace-only lines on purpose (the parser handles them).
+"tests/test_subtitles.py" = ["W293"]

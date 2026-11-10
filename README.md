@@ -120,16 +120,32 @@ GitHub Actions (`.github/workflows/tests.yml`) runs on every push to `main` and 
 
 `fetch` and `parse` save a transcript as JSON so later `show`, `search` and `link` calls do not need to fetch it again.
 
-- **Where:** `youtube-conversation/` inside the system temp folder, or the folder in `TUBEGPT_STORAGE_DIR`. It is created owner-only (mode 700) where supported; a folder that is a symbolic link or belongs to another user is refused. Files are named after the video ID (`<id>.json`) or `pasted-<hash>.json`.
+- **Where:** `youtube-conversation/` inside the system temp folder, or the folder in `TUBEGPT_STORAGE_DIR`. Files are named after the video ID (`<id>.json`) or `pasted-<32 hex characters>.json` (a SHA-256 of the pasted text and its timestamps; older 8-character names are still read and cleaned).
+- **Permissions on Linux and macOS (POSIX):** the default folder is created owner-only (mode 700) and its transcript files owner-only (600). A folder or file left behind with looser permissions (for example 755 or 644) is tightened the next time the tool uses it, but only after checking that you own it, and only for the folder itself and for files whose names this tool generates. Other files in the folder are never modified. A permission failure is reported as a clear error (exit code 7).
+- **Permissions on Windows:** Windows has no POSIX mode bits, so the tool does not change access rules there. Who can read the files is decided by the permissions the temp folder (or your chosen folder) already has, normally your own user profile. Do not assume the files are private from other administrators or other accounts on a shared machine.
+- **Links and other users' files:** a storage folder that is a symbolic link, is not a folder, or belongs to another user is refused. Inside the folder, symbolic links, special files and files owned by someone else are never read, changed or deleted. Reads (`show`, `search`, `link`) go through the same checks as saves.
 - **Retention:** a stored transcript is deleted once it has not been used (saved or read) for `TUBEGPT_RETENTION_HOURS` hours (default 24, range 0.1 to 8760).
 - **Limits:** when the folder exceeds `TUBEGPT_MAX_STORE_MB` megabytes (default 200) or `TUBEGPT_MAX_FILES` files (default 500), the oldest files are deleted first.
 - **When cleanup runs:** automatically before each save to the default folder, and on demand with `python skills/youtube-conversation/scripts/transcript.py cleanup` (`--dry-run` shows what would be removed). There is no background process, so files stay until the next run.
-- **Safety rules:** cleanup only touches regular files directly inside the storage folder whose names this tool generates; it never follows symbolic links, never recurses, and never deletes a file used in the last 5 minutes. A folder you choose with `TUBEGPT_STORAGE_DIR` is only cleaned if the tool created it (or found it empty) and marked it, so your own files are safe. Files written with `--out` are yours and are never deleted.
+- **Your own folder (`TUBEGPT_STORAGE_DIR`):** nothing in it is ever deleted unless you also set `TUBEGPT_STORAGE_CLEANUP=1`. Even then, cleanup only acts if the folder contains the `.tubegpt-store` marker file, which the tool writes when it creates the folder or finds it empty. The marker is a guard against pointing cleanup at the wrong folder, not proof that the folder is yours: anyone who can write to the folder can create that file. A non-empty folder you point the tool at is never adopted automatically, and its permissions are not changed unless it carries the marker.
+- **Safe cleanup:** cleanup only looks at regular files directly inside the folder whose names this tool generates (and its own leftover temporary files); it never recurses and deletes single files only. It never deletes a file used in the last 5 minutes. Each file is re-checked immediately before it is deleted, and one that was replaced, rewritten or read after the scan is kept. Saves, reads and cleanup runs take a lock file (`.tubegpt-lock`) inside the folder so cooperating processes do not interleave; if the lock cannot be taken, the re-check still protects the file. Files written with `--out` are yours and are never deleted.
 - **Writes are atomic:** a private temporary file is renamed into place, so a crash or a full disk never leaves a half-written transcript. A full or unwritable disk gives a clear message and exit code 7.
+- **Shared computers:** the default folder name is the same for every user. If another user created it first, the tool refuses it (exit code 7); set `TUBEGPT_STORAGE_DIR` to a folder of your own.
+
+## Environment variables
+
+| Variable | Meaning | Default |
+|---|---|---|
+| `TUBEGPT_STORAGE_DIR` | Folder for saved transcripts | `youtube-conversation/` in the system temp folder |
+| `TUBEGPT_STORAGE_CLEANUP` | Set to `1` to allow cleanup inside a folder given by `TUBEGPT_STORAGE_DIR` (the marker file is also required) | unset: nothing is deleted there |
+| `TUBEGPT_RETENTION_HOURS` | Hours without use before a transcript is deleted (0.1 to 8760) | 24 |
+| `TUBEGPT_MAX_STORE_MB` | Maximum total size of the folder in MB (1 to 10240) | 200 |
+| `TUBEGPT_MAX_FILES` | Maximum number of transcripts (1 to 10000) | 500 |
+| `TUBEGPT_RUN_INTEGRATION` | Set to `1` to run the optional real-YouTube test (tests only) | unset |
 
 ## Input validation and limits
 
-Saved transcripts are fully validated when loaded (types, required fields, finite non-negative timestamps, end after start, start times in order). A malformed file gives a clear error and exit code 2, never a crash. Other limits: input files up to 50 MB, saved transcripts up to 100 MB and 500,000 segments, search terms up to 500 characters (50 per search), 200 times per `link` call, `--max` 1 to 1000, `--context` 0 to 50, `--max-chars` 1 to 1,000,000, and times of at most 10,000,000 seconds. Minutes and seconds must be below 60 in `M:SS` and `H:MM:SS` times.
+Saved transcripts are fully validated when loaded (types, required fields, finite non-negative timestamps, end after start, start times in order), and every transcript the tool creates is validated by the same rules before it is saved, so a saved file can always be read back. A caption longer than 100,000 characters is split into several segments with the same timestamp instead of being rejected. Imported text must be valid UTF-8 (otherwise nothing is imported and the position of the bad byte is reported); the 50 MB input limit is counted in encoded bytes. A malformed file or number gives a clear error and exit code 2, never a crash. Other limits: input files up to 50 MB, saved transcripts up to 100 MB and 500,000 segments, search terms up to 500 characters (50 per search), 200 times per `link` call, `--max` 1 to 1000, `--context` 0 to 50, `--max-chars` 1 to 1,000,000, and times of at most 10,000,000 seconds. Minutes and seconds must be below 60 in `M:SS` and `H:MM:SS` times.
 
 ## Logging and exit codes
 

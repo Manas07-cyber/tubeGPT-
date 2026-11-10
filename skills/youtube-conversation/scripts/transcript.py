@@ -26,7 +26,8 @@ Storage: transcripts saved without --out go to <system temp>/youtube-conversatio
 by TUBEGPT_STORAGE_DIR). Files there are removed automatically when older than TUBEGPT_RETENTION_HOURS
 (default 24, counted from last use) and the oldest are removed when the folder exceeds
 TUBEGPT_MAX_STORE_MB (default 200) or TUBEGPT_MAX_FILES (default 500). Files written with --out are never
-touched by cleanup.
+touched by cleanup. In a folder you chose with TUBEGPT_STORAGE_DIR nothing is ever deleted unless you also
+set TUBEGPT_STORAGE_CLEANUP=1 (and the folder carries tubeGPT's marker file).
 
 Exit codes: 0 ok | 1 unexpected error | 2 bad input | 3 cannot reach YouTube |
             4 no readable transcript for this video | 5 YouTube refused the
@@ -36,20 +37,33 @@ Exit codes: 0 ok | 1 unexpected error | 2 bad input | 3 cannot reach YouTube |
 from __future__ import annotations
 
 import argparse
-import bisect
+import collections
+import contextlib
 import errno
 import hashlib
 import html
+import itertools
 import json
 import logging
 import math
 import os
 import re
+import stat
 import sys
 import tempfile
 import time
+import traceback
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
+
+try:  # POSIX advisory file locks
+    import fcntl
+except ImportError:  # Windows
+    fcntl = None
+try:  # Windows byte-range locks
+    import msvcrt
+except ImportError:  # POSIX
+    msvcrt = None
 
 EXIT_ERROR, EXIT_BAD_INPUT, EXIT_NETWORK = 1, 2, 3
 EXIT_NO_TRANSCRIPT, EXIT_BLOCKED, EXIT_MISSING_DEP = 4, 5, 6
@@ -63,6 +77,10 @@ TS_CUE = r"(?:\d{1,4}:)?\d{1,2}:\d{2}(?:[.,]\d{1,9})?"
 CUE_RE = re.compile(r"^\s*(" + TS_CUE + r")\s*-->\s*(" + TS_CUE + r")")
 PANEL_RE = re.compile(r"^\s*(" + TS + r")(?!\d)\s*[-\u2013\u2014\u00b7\u2022|:]?\s*(.*)$")
 CUE_ID_RE = re.compile(r"^\s*\d{1,9}\s*$")
+# Anything that looks like a caption timing line, even a malformed one ("00:99:99.000 --> ...", "1 --> 2").
+TIMING_LINE_RE = re.compile(r"^\s*[0-9:.,;]+\s*-->\s*[0-9:.,;]*")
+# Control characters other than whitespace never belong in speech; they could drive a terminal if printed.
+CONTROL_RE = re.compile(r"[\x00-\x08\x0e-\x1b\x7f-\x9f]")
 # Only real caption markup is stripped; a spoken "a < b and c > d" must survive.
 CUE_TAG_RE = re.compile(
     r"</?(?:i|b|u|c|v|ruby|rt|lang|font|span|br|p)(?:[.\s][^<>]*)?/?>"
@@ -81,10 +99,18 @@ MAX_LANG_CODES = 20
 # Rolling-caption handling (see parse_cues).
 ROLLING_GAP_S = 0.25
 FILLER_MAX_S = 0.05
+MAX_ROLLING_LINES = 8  # a rolling window is 2-3 lines; comparing more would only invite quadratic work
 
 # Storage defaults, all overridable through environment variables (see module docstring).
 STORE_MARKER = ".tubegpt-store"
-STORE_FILE_RE = re.compile(r"^(?:[A-Za-z0-9_-]{11}|pasted-[0-9a-f]{8})\.json$")
+MARKER_TEXT = ("tubeGPT transcript store v1\n"
+               "Files in this folder whose names match tubeGPT's own naming may be removed by 'cleanup' when\n"
+               "TUBEGPT_STORAGE_CLEANUP=1 is set. This file is a safety guard, not proof of ownership.\n")
+MARKER_PREFIX = "tubeGPT transcript store"
+LOCK_NAME = ".tubegpt-lock"
+LOCK_TIMEOUT_S = 10.0
+# <video id>.json, or pasted-<hash>.json (32 hex characters from SHA-256; 8 characters were used by older versions)
+STORE_FILE_RE = re.compile(r"^(?:[A-Za-z0-9_-]{11}|pasted-(?:[0-9a-f]{8}|[0-9a-f]{32}))\.json$")
 TMP_FILE_RE = re.compile(r"^\.tmp-[a-z0-9_]{8}\.json$")
 DEFAULT_RETENTION_HOURS = 24.0
 DEFAULT_MAX_STORE_MB = 200
@@ -144,7 +170,7 @@ TIME_ARG_RE = re.compile(
 
 
 def parse_time_arg(value: str) -> float:
-    text = value.strip().replace(",", ".") if isinstance(value, str) else ""
+    text = value.strip().replace(",", ".") if isinstance(value, str) and len(value) <= 64 else ""
     if re.search(r"(^|:)\s*-", text):
         die(f"Time cannot be negative: {value!r}", EXIT_BAD_INPUT)
     if not TIME_ARG_RE.match(text):
@@ -171,6 +197,7 @@ def clean_text(text: str, cue: bool = False) -> str:
     if cue:  # caption files carry <i>, <c>, <00:00:01.500> tags and HTML entities
         text = CUE_TAG_RE.sub("", text)
         text = html.unescape(text)
+    text = CONTROL_RE.sub("", text)
     # Zero-width space and BOM are noise; zero-width joiners are kept because Indic scripts need them.
     text = text.replace("\u200b", "").replace("\ufeff", "").replace("\xa0", " ")
     return re.sub(r"\s+", " ", text).strip()
@@ -181,8 +208,47 @@ def split_lines(text: str):
     return re.split(r"\r\n|\r|\n", text)
 
 
+def split_text(text: str, limit: int | None = None):
+    """Split ``text`` into pieces of at most ``limit`` characters (default MAX_SEGMENT_CHARS), preferring a space.
+
+    The default is looked up on each call, so it always matches the limit the loader enforces.
+    """
+    if limit is None:
+        limit = MAX_SEGMENT_CHARS
+    if len(text) <= limit:
+        return [text]
+    pieces, start = [], 0
+    while len(text) - start > limit:
+        cut = text.rfind(" ", start + limit // 2, start + limit + 1)
+        if cut == -1:  # no space in the window (for example unspaced CJK text): break at the limit
+            piece, start = text[start:start + limit], start + limit
+        else:
+            piece, start = text[start:cut], cut + 1
+        if piece:
+            pieces.append(piece)
+    if text[start:]:
+        pieces.append(text[start:])
+    return pieces
+
+
+def enforce_segment_limit(segments):
+    """Split any segment longer than MAX_SEGMENT_CHARS (same start/end for each piece). Returns (segments, count)."""
+    out, split = [], 0
+    for seg in segments:
+        if len(seg["text"]) <= MAX_SEGMENT_CHARS:
+            out.append(seg)
+            continue
+        split += 1
+        for piece in split_text(seg["text"]):
+            out.append({**seg, "text": piece})
+    return out, split
+
+
 def make_doc(segments, *, source, video_id=None, language=None, is_generated=None,
              title=None, channel=None):
+    segments, split = enforce_segment_limit(segments)
+    if split:
+        log.warning("Split %d very long caption segment(s) into smaller pieces so they can be saved and read.", split)
     stamps = [s["start"] for s in segments if s.get("start") is not None]
     ends = [s.get("end") if s.get("end") is not None else s["start"]
             for s in segments if s.get("start") is not None]
@@ -203,6 +269,18 @@ def make_doc(segments, *, source, video_id=None, language=None, is_generated=Non
 # --------------------------------------------------------------------------
 # storage: where saved transcripts live, how they are written and when they are removed
 # --------------------------------------------------------------------------
+_IS_POSIX = os.name == "posix"
+_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+_O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+_O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+_O_BINARY = getattr(os, "O_BINARY", 0)  # Windows only: no newline translation
+
+
+class UnsafeStoreEntry(Exception):
+    """A store entry that is a symbolic link, not a regular file, or owned by another user."""
+
+
 def default_dir() -> Path:
     custom = os.environ.get("TUBEGPT_STORAGE_DIR", "").strip()
     if custom:
@@ -213,6 +291,11 @@ def default_dir() -> Path:
 def custom_storage() -> bool:
     """True when the user pointed the store at their own folder (which may hold unrelated files)."""
     return bool(os.environ.get("TUBEGPT_STORAGE_DIR", "").strip())
+
+
+def custom_cleanup_enabled() -> bool:
+    """Deletion inside a user-chosen folder is opt-in: TUBEGPT_STORAGE_CLEANUP=1."""
+    return os.environ.get("TUBEGPT_STORAGE_CLEANUP", "").strip() == "1"
 
 
 def _env_number(name: str, default, lo, hi, integer: bool):
@@ -250,35 +333,151 @@ def storage_error(exc: OSError, action: str):
         "or choose another location with --out.", EXIT_STORAGE)
 
 
+def _owned_by_me(info) -> bool:
+    """True when the file belongs to the current user (always true where the OS has no user IDs)."""
+    return not hasattr(os, "getuid") or info.st_uid == os.getuid()
+
+
+def _open_regular(path, flags=os.O_RDONLY, mode=0o600):
+    """Open an existing file without following a symbolic link; verify it is a regular file we own.
+
+    Returns (fd, fstat result). Raises UnsafeStoreEntry for links, special files and other users' files.
+    """
+    if not _IS_POSIX and os.path.islink(path):  # Windows has no O_NOFOLLOW
+        raise UnsafeStoreEntry("symbolic link")
+    try:
+        fd = os.open(path, flags | _O_NOFOLLOW | _O_NONBLOCK | _O_CLOEXEC | _O_BINARY, mode)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:  # O_NOFOLLOW met a symbolic link
+            raise UnsafeStoreEntry("symbolic link") from exc
+        raise
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise UnsafeStoreEntry("not a regular file")
+        if not _owned_by_me(info):
+            raise UnsafeStoreEntry("owned by another user")
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd, info
+
+
+def marker_is_valid(store) -> bool:
+    """True if the store folder holds a real marker file: a regular, non-link file we own with our header.
+
+    This is a guard against deleting inside a folder that was never meant as a transcript store. It is NOT
+    proof of ownership: anyone who can write to the folder can create the file.
+    """
+    try:
+        fd, info = _open_regular(Path(store) / STORE_MARKER)
+    except (OSError, UnsafeStoreEntry):
+        return False
+    with os.fdopen(fd, "rb") as handle:
+        head = handle.read(256)
+    return info.st_size < 4096 and head.decode("utf-8", errors="replace").startswith(MARKER_PREFIX)
+
+
+def _write_marker(store):
+    """Create the marker atomically and without following links; an existing marker is left alone."""
+    try:
+        fd = os.open(Path(store) / STORE_MARKER,
+                     os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW | _O_CLOEXEC | _O_BINARY, 0o600)
+    except FileExistsError:
+        return
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(MARKER_TEXT.encode("utf-8"))
+
+
+def _tighten_dir(store):
+    """Make the store folder owner-only (0700) through a descriptor, so a swapped-in link is never followed."""
+    if not _IS_POSIX:
+        return
+    fd = os.open(store, os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW | _O_CLOEXEC)
+    try:
+        info = os.fstat(fd)
+        if not _owned_by_me(info):
+            die("The transcript storage folder belongs to another user, so it was not used.", EXIT_STORAGE)
+        if stat.S_IMODE(info.st_mode) & 0o077:
+            os.fchmod(fd, 0o700)
+    finally:
+        os.close(fd)
+
+
+def secure_store_files(store):
+    """Make tubeGPT's own transcript files owner-only (0600). Other files in the folder are never touched.
+
+    Only regular files with tubeGPT's generated names, owned by the current user and not reached through a
+    symbolic link are changed. Called only for folders that are ours (the default store or a marked one).
+    """
+    if not _IS_POSIX:
+        return 0
+    changed = 0
+    try:
+        names = os.listdir(store)
+    except OSError as exc:
+        storage_error(exc, "check the permissions of saved transcripts")
+    for name in names:
+        if not (STORE_FILE_RE.match(name) or TMP_FILE_RE.match(name)):
+            continue
+        try:
+            fd, info = _open_regular(Path(store) / name)
+        except UnsafeStoreEntry:
+            log.debug("event=permission_check_skipped reason=unsafe_entry")
+            continue
+        except FileNotFoundError:
+            continue  # removed by another process meanwhile
+        except OSError as exc:
+            storage_error(exc, "check the permissions of saved transcripts")
+        try:
+            if stat.S_IMODE(info.st_mode) & 0o077:
+                os.fchmod(fd, 0o600)
+                changed += 1
+        except OSError as exc:
+            storage_error(exc, "restrict the permissions of saved transcripts")
+        finally:
+            os.close(fd)
+    return changed
+
+
 def ensure_store(create: bool = True) -> Path:
     """Return the transcript store folder, creating it privately and refusing unsafe ones.
 
-    The shared default location is refused if it is a symbolic link or belongs to another user, so a local
-    attacker cannot pre-create it to read or redirect transcripts. A folder chosen with TUBEGPT_STORAGE_DIR
-    may hold unrelated files, so cleanup only runs there once it carries our marker file, which is written
-    only when we created the folder or found it empty.
+    Both the default and a user-chosen folder are refused if the final path component is a symbolic link, is
+    not a folder, or belongs to another user. On POSIX a folder that is ours (the default store, or a custom
+    one carrying tubeGPT's marker) is tightened to owner-only 0700 and its transcript files to 0600; a custom
+    folder that is not ours is never re-permissioned. A marker is written only when we created the custom folder
+    or found it empty.
     """
     store = default_dir()
     custom = custom_storage()
     try:
-        if not custom and store.is_symlink():
-            die("The transcript storage folder is a symbolic link, so it was not used.", EXIT_STORAGE)
         created = False
-        if not store.exists():
+        try:
+            info = os.lstat(store)
+        except FileNotFoundError:
             if not create:
                 return store
-            store.mkdir(parents=True, mode=0o700)
-            created = True
-        elif not store.is_dir():
+            try:
+                store.mkdir(parents=True, mode=0o700)
+                created = True
+            except FileExistsError:
+                pass  # somebody else created it first: validated like any existing folder below
+            info = os.lstat(store)
+        if stat.S_ISLNK(info.st_mode):
+            die("The transcript storage folder is a symbolic link, so it was not used. "
+                "Point TUBEGPT_STORAGE_DIR at the real folder.", EXIT_STORAGE)
+        if not stat.S_ISDIR(info.st_mode):
             die("The transcript storage location exists but is not a folder.", EXIT_STORAGE)
-        info = store.stat()
-        if hasattr(os, "getuid") and info.st_uid != os.getuid():
+        if not _owned_by_me(info):
             die("The transcript storage folder belongs to another user, so it was not used.", EXIT_STORAGE)
-        if os.name == "posix" and info.st_mode & 0o022:
-            store.chmod(0o700)
-        marker = store / STORE_MARKER
-        if custom and not marker.exists() and (created or not any(store.iterdir())):
-            marker.write_text("tubeGPT transcript store: files here may be removed by cleanup.\n", encoding="utf-8")
+        if custom and create and not marker_is_valid(store) and (created or not any(store.iterdir())):
+            _write_marker(store)
+        if not custom or marker_is_valid(store):
+            _tighten_dir(store)
+            secure_store_files(store)
+        else:
+            log.debug("event=custom_store_permissions_unchanged")
     except OSError as exc:
         storage_error(exc, "prepare the transcript storage folder")
     return store
@@ -295,12 +494,73 @@ def store_file(name: str) -> Path:
     return path
 
 
+def _lock_acquire(fd, shared: bool, timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            if fcntl is not None:
+                fcntl.flock(fd, (fcntl.LOCK_SH if shared else fcntl.LOCK_EX) | fcntl.LOCK_NB)
+            elif msvcrt is not None:  # byte-range locks are exclusive only
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            else:
+                return False
+            return True
+        except OSError:
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.05)
+
+
+def _lock_release(fd):
+    try:
+        if fcntl is not None:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        elif msvcrt is not None:
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+    except OSError as exc:
+        log.debug("event=unlock_failed error=%s", type(exc).__name__)
+
+
+@contextlib.contextmanager
+def store_lock(store, *, shared: bool = False, timeout: float = LOCK_TIMEOUT_S):
+    """Advisory lock on the store (a lock file inside it) that serialises saves, reads-with-touch and cleanup.
+
+    Yields True when the lock is held and False when it could not be taken within ``timeout`` seconds or
+    locking is unavailable. Callers must stay correct without it (cleanup revalidates every file), the lock
+    only closes the remaining windows between cooperating tubeGPT processes.
+    """
+    fd = None
+    try:
+        if custom_storage() and not marker_is_valid(store):
+            raise UnsafeStoreEntry("not a tubeGPT store")  # never create files in an unrelated folder
+        fd, _ = _open_regular(Path(store) / LOCK_NAME, os.O_RDWR | os.O_CREAT)
+    except (OSError, UnsafeStoreEntry) as exc:
+        log.debug("event=lock_unavailable error=%s", type(exc).__name__)
+    held = False
+    try:
+        if fd is not None:
+            held = _lock_acquire(fd, shared, timeout)
+            if not held:
+                log.debug("event=lock_timeout")
+        yield held
+    finally:
+        if fd is not None:
+            if held:
+                _lock_release(fd)
+            os.close(fd)
+
+
 def write_json_atomic(path, doc):
     """Write JSON through a private temporary file in the same folder, then rename it into place.
 
     A crash or a full disk never leaves a half-written transcript, and the temporary file is always removed.
     """
-    data = json.dumps(doc, ensure_ascii=False, indent=1).encode("utf-8")
+    try:
+        data = json.dumps(doc, ensure_ascii=False, indent=1, allow_nan=False).encode("utf-8")
+    except (ValueError, TypeError, UnicodeEncodeError) as exc:
+        die(f"The transcript could not be converted to JSON ({type(exc).__name__}).", EXIT_BAD_INPUT)
     if len(data) > MAX_DOC_BYTES:
         die(f"The transcript is too large to save ({len(data) // (1024 * 1024)} MB; the limit is "
             f"{MAX_DOC_BYTES // (1024 * 1024)} MB).", EXIT_BAD_INPUT)
@@ -323,95 +583,184 @@ def write_json_atomic(path, doc):
                 log.debug("event=temp_cleanup_failed error=%s", type(exc).__name__)
 
 
+class _Entry(collections.namedtuple("_Entry", "name mtime size ident is_tmp")):
+    """A scanned store file. ``ident`` (device, inode, mtime_ns, size) detects replacement or refresh."""
+
+
+def _dir_fd(store):
+    if not (_IS_POSIX and os.scandir in os.supports_fd and os.stat in os.supports_dir_fd
+            and os.unlink in os.supports_dir_fd):
+        return None
+    fd = os.open(store, os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW | _O_CLOEXEC)
+    if not _owned_by_me(os.fstat(fd)):
+        os.close(fd)
+        raise UnsafeStoreEntry("owned by another user")
+    return fd
+
+
+def _stat_entry(store, dirfd, name):
+    if dirfd is not None:
+        return os.stat(name, dir_fd=dirfd, follow_symlinks=False)
+    return os.lstat(Path(store) / name)
+
+
+def _scan_store(store, dirfd):
+    entries = []
+    with os.scandir(dirfd if dirfd is not None else store) as it:
+        for entry in it:
+            is_tmp = bool(TMP_FILE_RE.match(entry.name))
+            if not (is_tmp or STORE_FILE_RE.match(entry.name)):
+                continue
+            try:
+                info = _stat_entry(store, dirfd, entry.name)
+            except OSError:
+                continue
+            if not stat.S_ISREG(info.st_mode) or not _owned_by_me(info):
+                continue  # links, folders and other users' files are never candidates
+            entries.append(_Entry(entry.name, info.st_mtime, info.st_size,
+                                  (info.st_dev, info.st_ino, info.st_mtime_ns, info.st_size), is_tmp))
+    return entries
+
+
+def _remove_if_unchanged(store, dirfd, entry, now, min_age):
+    """Delete ``entry`` only if it is still exactly the file that was scanned and is still old enough.
+
+    A file that another process replaced, rewrote or touched (a read counts as use) since the scan is kept.
+    """
+    try:
+        info = _stat_entry(store, dirfd, entry.name)
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        log.warning("Could not re-check an old transcript file (%s).", type(exc).__name__)
+        return False
+    ident = (info.st_dev, info.st_ino, info.st_mtime_ns, info.st_size)
+    if not stat.S_ISREG(info.st_mode) or not _owned_by_me(info) or ident != entry.ident:
+        log.debug("event=cleanup_skipped_changed")
+        return False
+    if now - info.st_mtime < min_age:
+        return False
+    try:
+        if dirfd is not None:
+            os.unlink(entry.name, dir_fd=dirfd)
+        else:
+            os.unlink(Path(store) / entry.name)
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        log.warning("Could not remove an old transcript file (%s).", type(exc).__name__)
+        return False
+    return True
+
+
+def cleanup_allowed(store):
+    """Return (allowed, reason). Custom folders need TUBEGPT_STORAGE_CLEANUP=1 and a valid marker file."""
+    if not custom_storage():
+        return True, ""
+    if not custom_cleanup_enabled():
+        return False, "optin"
+    if not marker_is_valid(store):
+        return False, "marker"
+    return True, ""
+
+
 def cleanup_store(store, *, keep=(), dry_run: bool = False, now=None):
     """Delete expired and surplus transcripts from the store. Returns a summary dict.
 
     Safety rules, all covered by tests:
-    - for a folder chosen with TUBEGPT_STORAGE_DIR, only acts when it carries our marker file;
-    - only looks at regular files directly inside the store (no recursion, symbolic links ignored);
+    - in a folder chosen with TUBEGPT_STORAGE_DIR, acts only with TUBEGPT_STORAGE_CLEANUP=1 and a valid marker;
+    - only looks at regular files directly inside the store, owned by the current user (no recursion;
+      symbolic links and other users' files are ignored);
     - only deletes names this program generates (<video id>.json, pasted-<hash>.json, leftover .tmp-*.json);
     - never deletes a file in ``keep`` or one used (loaded or saved) within the last CLEANUP_GRACE_S seconds;
+    - re-checks each file immediately before deleting it and skips any that was replaced or refreshed after
+      the scan (callers also hold store_lock so cooperating processes cannot interleave);
     - uses os.unlink on single files only, never recursive deletion.
     """
     store = Path(store)
     result = {"expired": 0, "over_limit": 0, "freed_bytes": 0, "remaining": 0, "dry_run": dry_run}
-    if custom_storage() and not (store / STORE_MARKER).is_file():
-        log.debug("event=cleanup_skipped reason=no_marker")
+    allowed, reason = cleanup_allowed(store)
+    if not allowed:
+        log.debug("event=cleanup_skipped reason=%s", reason)
         return result
     retention_s, max_bytes, max_files = storage_limits()
     now = time.time() if now is None else now
     keep_names = {Path(k).name for k in keep}
-    entries = []  # (mtime, name, size, is_tmp)
+    dirfd = None
     try:
-        listing = list(os.scandir(store))
-    except OSError as exc:
-        log.warning("Could not list the transcript store for cleanup (%s).", type(exc).__name__)
-        return result
-    for entry in listing:
-        is_tmp = bool(TMP_FILE_RE.match(entry.name))
-        if not (is_tmp or STORE_FILE_RE.match(entry.name)):
-            continue
-        try:
-            if not entry.is_file(follow_symlinks=False):
-                continue
-            info = entry.stat(follow_symlinks=False)
-        except OSError:
-            continue
-        entries.append((info.st_mtime, entry.name, info.st_size, is_tmp))
-    entries.sort()
+        dirfd = _dir_fd(store)
+        entries = _scan_store(store, dirfd)
+        entries.sort(key=lambda e: (e.mtime, e.name))
 
-    def protected(mtime, name):
-        return name in keep_names or now - mtime < CLEANUP_GRACE_S
+        def protected(entry):
+            return entry.name in keep_names or now - entry.mtime < CLEANUP_GRACE_S
 
-    removed = set()
+        removed = set()
 
-    def remove(mtime, name, size, kind):
-        if dry_run:
-            removed.add(name)
-        else:
-            try:
-                os.unlink(store / name)
-            except OSError as exc:
-                log.warning("Could not remove an old transcript file (%s).", type(exc).__name__)
+        def remove(entry, kind, min_age):
+            if not dry_run and not _remove_if_unchanged(store, dirfd, entry, now, min_age):
                 return False
-            removed.add(name)
-        result[kind] += 1
-        result["freed_bytes"] += size
-        return True
+            removed.add(entry.name)
+            result[kind] += 1
+            result["freed_bytes"] += entry.size
+            return True
 
-    for mtime, name, size, is_tmp in entries:
-        limit = CLEANUP_GRACE_S if is_tmp else retention_s
-        if not protected(mtime, name) and now - mtime > limit:
-            remove(mtime, name, size, "expired")
-    live = [e for e in entries if e[1] not in removed and not e[3]]
-    total, count = sum(e[2] for e in live), len(live)
-    for mtime, name, size, _ in live:
-        if total <= max_bytes and count <= max_files:
-            break
-        if not protected(mtime, name) and remove(mtime, name, size, "over_limit"):
-            total -= size
-            count -= 1
-    result["remaining"] = count
+        for entry in entries:
+            limit = CLEANUP_GRACE_S if entry.is_tmp else retention_s
+            if not protected(entry) and now - entry.mtime > limit:
+                remove(entry, "expired", limit)
+        live = [e for e in entries if e.name not in removed and not e.is_tmp]
+        total, count = sum(e.size for e in live), len(live)
+        for entry in live:
+            if total <= max_bytes and count <= max_files:
+                break
+            if not protected(entry) and remove(entry, "over_limit", CLEANUP_GRACE_S):
+                total -= entry.size
+                count -= 1
+        result["remaining"] = count
+    except (OSError, UnsafeStoreEntry) as exc:
+        log.warning("Could not clean the transcript store (%s).", type(exc).__name__)
+        return result
+    finally:
+        if dirfd is not None:
+            os.close(dirfd)
     log.debug("event=cleanup expired=%d over_limit=%d freed_bytes=%d remaining=%d dry_run=%s",
-              result["expired"], result["over_limit"], result["freed_bytes"], count, dry_run)
+              result["expired"], result["over_limit"], result["freed_bytes"], result["remaining"], dry_run)
     return result
 
 
+def pasted_name(doc) -> str:
+    """Stable store name for a transcript without a video ID: SHA-256 over every timestamp and text."""
+    digest = hashlib.sha256()
+    for seg in doc["segments"]:
+        digest.update(repr(seg.get("start")).encode("ascii"))
+        digest.update(b"\0")
+        digest.update(seg["text"].encode("utf-8"))
+        digest.update(b"\0")
+    return "pasted-" + digest.hexdigest()[:32]
+
+
 def save_doc(doc, out):
+    """Validate, then save. A document that this program could not load again is never written."""
+    try:
+        validate_doc(doc)
+    except InvalidDocument as exc:
+        die(f"The transcript was not saved because it is not valid: {exc}.", EXIT_BAD_INPUT)
     if out:
         path = Path(out)
         if path.is_dir():
             die("--out must be a file path, but it points to a folder.", EXIT_BAD_INPUT)
         write_json_atomic(path, doc)
         return path
-    name = doc.get("video_id")
-    if not name:
-        text = "".join(s["text"] for s in doc["segments"]).encode("utf-8")
-        name = "pasted-" + hashlib.sha1(text, usedforsecurity=False).hexdigest()[:8]
-    ensure_store()
+    name = doc.get("video_id") or pasted_name(doc)
+    store = ensure_store()
     path = store_file(f"{name}.json")
-    cleanup_store(default_dir(), keep=[path])
-    write_json_atomic(path, doc)
+    with store_lock(store) as locked:
+        if locked:
+            cleanup_store(store, keep=[path])
+        else:
+            log.debug("event=cleanup_deferred reason=lock_busy")
+        write_json_atomic(path, doc)
     return path
 
 
@@ -422,12 +771,16 @@ class InvalidDocument(ValueError):
     """A saved transcript that does not have the structure this tool writes."""
 
 
+class ParseError(ValueError):
+    """Pasted or imported text that looks like a timestamped caption file but contains no readable cues."""
+
+
 def _number(value, what, *, lo=0.0, hi=float(MAX_SECONDS)):
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise InvalidDocument(f"{what} must be a number")
-    if not math.isfinite(value):
+    if isinstance(value, float) and not math.isfinite(value):  # (math.isfinite overflows on huge integers)
         raise InvalidDocument(f"{what} must be a finite number")
-    if not lo <= value <= hi:
+    if not lo <= value <= hi:  # Python compares integers and floats exactly, so this cannot overflow
         raise InvalidDocument(f"{what} is out of range")
     return value
 
@@ -504,45 +857,101 @@ def _reject_constant(name):
     raise ValueError(f"the JSON contains the invalid number {name}")
 
 
-def load_doc(src: str):
-    path = None
+def _read_validated(fd, info, name):
+    """Read and validate a saved transcript from an already opened, already checked file descriptor."""
+    if info.st_size > MAX_DOC_BYTES:
+        die(f"{name} is too large to open ({info.st_size // (1024 * 1024)} MB; the limit is "
+            f"{MAX_DOC_BYTES // (1024 * 1024)} MB).", EXIT_BAD_INPUT)
+    with os.fdopen(os.dup(fd), "rb") as handle:
+        data = handle.read(MAX_DOC_BYTES + 1)
+    if len(data) > MAX_DOC_BYTES:
+        die(f"{name} is too large to open (the limit is {MAX_DOC_BYTES // (1024 * 1024)} MB).", EXIT_BAD_INPUT)
     try:
-        if Path(src).is_file():
-            path = Path(src)
-    except (OSError, ValueError):
-        pass
-    if path is None:
-        vid = extract_video_id(src)
-        if vid:
-            candidate = store_file(f"{vid}.json")
-            if candidate.is_file():
-                path = candidate
-    if path is None:
-        die(f"No saved transcript for {src!r}. Run 'fetch' (or 'parse' for pasted text) first.", EXIT_BAD_INPUT)
-    try:
-        size = path.stat().st_size
-        if size > MAX_DOC_BYTES:
-            die(f"{path.name} is too large to open ({size // (1024 * 1024)} MB; the limit is "
-                f"{MAX_DOC_BYTES // (1024 * 1024)} MB).", EXIT_BAD_INPUT)
-        doc = validate_doc(json.loads(path.read_text(encoding="utf-8-sig"), parse_constant=_reject_constant))
-    except (ValueError, RecursionError) as exc:  # InvalidDocument, JSONDecodeError, UnicodeDecodeError, ...
+        return validate_doc(json.loads(data.decode("utf-8-sig"), parse_constant=_reject_constant))
+    except (ValueError, RecursionError, OverflowError) as exc:  # InvalidDocument, JSONDecodeError, ...
         if isinstance(exc, json.JSONDecodeError):
             detail = "it is not valid JSON"
         elif isinstance(exc, UnicodeDecodeError):
             detail = "it is not valid UTF-8 text"
         elif isinstance(exc, RecursionError):
             detail = "its JSON is nested too deeply"
+        elif isinstance(exc, OverflowError):
+            detail = "it contains a number that is too large"
         else:  # InvalidDocument, or the invalid-number ValueError raised by _reject_constant
             detail = str(exc)
-        die(f"{path.name} is not a saved transcript: {detail}. "
+        die(f"{name} is not a saved transcript: {detail}. "
             "Use 'parse' to import a pasted transcript or caption file.", EXIT_BAD_INPUT)
+
+
+def _touch(fd, path):
+    """Mark a stored transcript as used (resets its retention clock)."""
+    try:
+        if os.utime in os.supports_fd:
+            os.utime(fd)
+        else:
+            os.utime(path)
+    except OSError as exc:
+        log.debug("event=touch_failed error=%s", type(exc).__name__)
+
+
+def _is_store_path(path: Path) -> bool:
+    return os.path.dirname(os.path.abspath(path)) == os.path.abspath(default_dir())
+
+
+def load_doc(src: str):
+    """Load a saved transcript by file path, video URL or video ID.
+
+    Anything inside the transcript store goes through the same checks as saving: the store folder must not be a
+    link or belong to another user, and a stored file must be a regular file owned by us (links are never
+    followed). A file you name explicitly elsewhere is read as you asked.
+    """
+    path = None
+    try:
+        if Path(src).is_file():
+            path = Path(src)
+    except (OSError, ValueError):
+        pass
+    in_store = path is not None and _is_store_path(path)
+    if path is None:
+        vid = extract_video_id(src)
+        if vid:
+            path, in_store = store_file(f"{vid}.json"), True
+    if in_store:
+        store = ensure_store(create=False)
+        if not store.is_dir() or not path.exists() and not path.is_symlink():
+            path = None
+    if path is None:
+        die(f"No saved transcript for {src!r}. Run 'fetch' (or 'parse' for pasted text) first.", EXIT_BAD_INPUT)
+    try:
+        if in_store:
+            with store_lock(store, shared=True):
+                try:
+                    fd, info = _open_regular(path)
+                except UnsafeStoreEntry as exc:
+                    die(f"{path.name} was not used because it is not a regular transcript file owned by you "
+                        f"({exc}). Symbolic links in the transcript store are never followed.", EXIT_STORAGE)
+                try:
+                    if _IS_POSIX and stat.S_IMODE(info.st_mode) & 0o077 and (not custom_storage()
+                                                                           or marker_is_valid(store)):
+                        os.fchmod(fd, 0o600)
+                    doc = _read_validated(fd, info, path.name)
+                    _touch(fd, path)  # reading counts as use, so cleanup keeps it
+                finally:
+                    os.close(fd)
+        else:
+            try:
+                fd, info = _open_regular(path)
+            except UnsafeStoreEntry:  # a link or special file you named yourself: read what it points to
+                fd, info = os.open(path, os.O_RDONLY), os.stat(path)
+                if not stat.S_ISREG(info.st_mode):
+                    os.close(fd)
+                    die(f"Cannot read {path.name}: it is not a regular file.", EXIT_BAD_INPUT)
+            try:
+                doc = _read_validated(fd, info, path.name)
+            finally:
+                os.close(fd)
     except OSError as exc:
         die(f"Cannot read {path.name} ({type(exc).__name__}).", EXIT_BAD_INPUT)
-    if path.parent == default_dir():  # reading a stored transcript counts as use, so cleanup keeps it
-        try:
-            os.utime(path)
-        except OSError as exc:
-            log.debug("event=touch_failed error=%s", type(exc).__name__)
     return doc, path
 
 
@@ -605,7 +1014,7 @@ def clock_seconds(ts: str):
 
 def _rolling_overlap(previous, block):
     """Number of leading lines of ``block`` that repeat the trailing lines of ``previous``."""
-    for k in range(min(len(previous), len(block)), 0, -1):
+    for k in range(min(len(previous), len(block), MAX_ROLLING_LINES), 0, -1):
         if previous[-k:] == block[:k]:
             return k
     return 0
@@ -622,17 +1031,19 @@ def parse_cues(text: str, warnings=None):
     silently.
     """
     lines = split_lines(text)
-    segments, skipped, adjusted = [], 0, 0
+    segments, skipped, adjusted, duplicates = [], 0, 0, 0
     prev_block, prev_end, i, n = None, None, 0, len(lines)
     while i < n:
         m = CUE_RE.match(lines[i])
         if not m:
+            if TIMING_LINE_RE.match(lines[i]):
+                skipped += 1  # a timing line we cannot read: its text lines below are skipped with it
             i += 1
             continue
         start, end = clock_seconds(m.group(1)), clock_seconds(m.group(2))
         i += 1
         block = []
-        while i < n and not CUE_RE.match(lines[i]):
+        while i < n and not CUE_RE.match(lines[i]) and not TIMING_LINE_RE.match(lines[i]):
             line = lines[i]
             if not line.strip():
                 if line == "" or block:
@@ -662,7 +1073,8 @@ def parse_cues(text: str, warnings=None):
             continue
         text_out = " ".join(fresh)
         if segments and segments[-1]["start"] == start and segments[-1]["text"] == text_out:
-            continue  # exact duplicate cue
+            duplicates += 1  # exact duplicate cue
+            continue
         segments.append({"start": start, "end": end, "text": text_out})
     if any(b["start"] < a["start"] for a, b in zip(segments, segments[1:])):
         segments.sort(key=lambda seg: seg["start"])  # stable: equal starts keep their file order
@@ -670,15 +1082,17 @@ def parse_cues(text: str, warnings=None):
     if warnings is not None:
         if skipped:
             warnings.append(f"Skipped {skipped} caption cue(s) with malformed timestamps.")
+        if duplicates:
+            warnings.append(f"Dropped {duplicates} caption cue(s) that exactly repeated the cue before them.")
         if adjusted:
             warnings.append("Some caption cues were out of order or ended before they started; "
                             "they were re-ordered or corrected.")
     return segments
 
 
-def parse_panel(lines):
+def parse_panel(lines, warnings=None):
     """Text copied from YouTube's 'Show transcript' panel: timestamp, then text."""
-    segments, start, buf = [], None, []
+    segments, start, buf, ignored = [], None, [], 0
 
     def flush():
         if start is not None:
@@ -698,9 +1112,13 @@ def parse_panel(lines):
                 start = t
                 buf = [m.group(2)] if m.group(2).strip() else []
                 continue
-        if start is not None:  # header lines before the first timestamp are ignored
+        if start is not None:
             buf.append(line)
+        else:
+            ignored += 1  # header lines before the first timestamp are not transcript text
     flush()
+    if warnings is not None and ignored:
+        warnings.append(f"Ignored {ignored} line(s) before the first timestamp (headings or page text).")
     return segments
 
 
@@ -724,12 +1142,16 @@ def parse_plain(text: str):
 def parse_transcript_text(text: str, warnings=None):
     text = text.lstrip("\ufeff")
     lines = split_lines(text)
-    if any(CUE_RE.match(line) for line in lines):
+    timing_lines = sum(1 for line in lines if TIMING_LINE_RE.match(line))
+    if timing_lines:
         segs = parse_cues(text, warnings)
         if segs:
             return segs, "caption file (srt/vtt)"
+        raise ParseError(f"The text has {timing_lines} caption timing line(s) (\"-->\") but none could be read, "
+                         "so it was not imported as plain text. Check the timestamps, for example "
+                         "00:01:02.500 --> 00:01:04.000.")
     if sum(1 for line in lines if PANEL_RE.match(line)) >= 2:
-        segs = parse_panel(lines)
+        segs = parse_panel(lines, warnings)
         if segs:
             return segs, "pasted transcript (with timestamps)"
     return parse_plain(text), "pasted text (no timestamps)"
@@ -738,10 +1160,23 @@ def parse_transcript_text(text: str, warnings=None):
 # --------------------------------------------------------------------------
 # fetch
 # --------------------------------------------------------------------------
+def scrub(text: str, limit: int = 700) -> str:
+    """Collapse whitespace, hide this machine's home, working and temp folders, and cap the length."""
+    text = re.sub(r"\s+", " ", str(text)).strip()
+    folders = {str(Path.home()), tempfile.gettempdir()}
+    try:
+        folders.add(os.getcwd())
+    except OSError:
+        pass
+    for folder in sorted(folders, key=len, reverse=True):
+        if len(folder) > 1:
+            text = text.replace(folder, "<folder>")
+    return text[:limit] + ("..." if len(text) > limit else "")
+
+
 def classify_error(exc):
     name = type(exc).__name__
-    text = str(exc).strip()
-    short = text[:700] + ("..." if len(text) > 700 else "")
+    short = scrub(exc)
     try:
         import requests
         is_net = isinstance(exc, (requests.exceptions.ConnectionError, requests.exceptions.Timeout))
@@ -756,7 +1191,8 @@ def classify_error(exc):
     if name in ("TranscriptsDisabled", "NoTranscriptFound", "VideoUnavailable", "VideoUnplayable",
                 "AgeRestricted", "InvalidVideoId"):
         return EXIT_NO_TRANSCRIPT, f"No transcript could be read for this video ({name}). Details: {short}"
-    return EXIT_ERROR, f"Unexpected error ({name}): {short}"
+    log.debug("event=fetch_error type=%s detail=%s", name, short)
+    return EXIT_ERROR, f"Unexpected error while fetching the transcript ({name}). Re-run with -v for details."
 
 
 def pick_transcript(tlist, langs):
@@ -790,8 +1226,8 @@ def try_oembed(video_id):
     if not isinstance(data, dict):
         return None, None
     title, channel = data.get("title"), data.get("author_name")
-    return (title[:300] if isinstance(title, str) else None,
-            channel[:300] if isinstance(channel, str) else None)
+    return (clean_text(title)[:300] if isinstance(title, str) else None,
+            clean_text(channel)[:300] if isinstance(channel, str) else None)
 
 
 def requirements_hint() -> str:
@@ -810,7 +1246,7 @@ def segments_from_raw(raw):
                 continue
             start = float(item["start"])
             duration = float(item.get("duration") or 0)
-        except (AttributeError, KeyError, TypeError, ValueError):
+        except (AttributeError, KeyError, TypeError, ValueError, OverflowError):  # OverflowError: huge integers
             skipped += 1
             continue
         if not (math.isfinite(start) and math.isfinite(duration)) or not 0 <= start <= MAX_SECONDS or duration < 0:
@@ -848,6 +1284,8 @@ def cmd_fetch(a):
                 "Re-run with --lang <code>, or --lang any.", EXIT_NO_TRANSCRIPT)
         raw = chosen.fetch().to_raw_data()
         language, generated = chosen.language_code, bool(chosen.is_generated)
+        if not isinstance(language, str) or not LANG_CODE_RE.match(language) or len(language) > 35:
+            language = None  # never store something the loader would reject
     except Exception as exc:
         code, message = classify_error(exc)
         die(message, code)
@@ -869,13 +1307,44 @@ def cmd_fetch(a):
     return 0
 
 
+def decode_input(data: bytes, name: str) -> str:
+    """Decode imported text as UTF-8 (a leading BOM is allowed). Invalid bytes are an error, never replaced."""
+    try:
+        return data.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        die(f"{name} is not valid UTF-8 text (invalid byte at position {exc.start}). Save or export it as UTF-8 "
+            "and try again; nothing was imported.", EXIT_BAD_INPUT)
+
+
+def _too_large(name: str):
+    die(f"{name} is too large (the limit is {MAX_INPUT_BYTES // (1024 * 1024)} MB of UTF-8 text).", EXIT_BAD_INPUT)
+
+
+def read_stdin_bytes() -> bytes:
+    """Read standard input as bytes, enforcing MAX_INPUT_BYTES on the encoded size."""
+    buffer = getattr(sys.stdin, "buffer", None)
+    if buffer is not None:  # the normal case: raw bytes, independent of the console's locale
+        data = buffer.read(MAX_INPUT_BYTES + 1)
+        if len(data) > MAX_INPUT_BYTES:
+            _too_large("The input")
+        return data
+    chunks, total = [], 0  # a text-only stream: count the UTF-8 size of what it yields, chunk by chunk
+    while True:
+        chunk = sys.stdin.read(1024 * 1024)
+        if not chunk:
+            break
+        encoded = chunk.encode("utf-8", errors="surrogateescape")
+        total += len(encoded)
+        if total > MAX_INPUT_BYTES:
+            _too_large("The input")
+        chunks.append(encoded)
+    return b"".join(chunks)
+
+
 def read_input_text(file_arg: str) -> str:
     """Read the text to import from a file or stdin, refusing non-files and oversized input."""
     if file_arg == "-":
-        text = sys.stdin.read(MAX_INPUT_BYTES + 1)
-        if len(text) > MAX_INPUT_BYTES:
-            die(f"The input is too large (the limit is {MAX_INPUT_BYTES // (1024 * 1024)} MB).", EXIT_BAD_INPUT)
-        return text
+        return decode_input(read_stdin_bytes(), "The input")
     try:
         path = Path(file_arg)
         if not path.is_file():  # also rejects folders, devices and pipes, which could block or never end
@@ -885,8 +1354,8 @@ def read_input_text(file_arg: str) -> str:
     except (OSError, ValueError) as exc:
         die(f"Cannot read {file_arg!r} ({type(exc).__name__}).", EXIT_BAD_INPUT)
     if len(data) > MAX_INPUT_BYTES:
-        die(f"{path.name} is too large (the limit is {MAX_INPUT_BYTES // (1024 * 1024)} MB).", EXIT_BAD_INPUT)
-    return data.decode("utf-8-sig", errors="replace")
+        _too_large(path.name)
+    return decode_input(data, path.name)
 
 
 def cmd_parse(a):
@@ -899,7 +1368,10 @@ def cmd_parse(a):
         if not vid:
             die(f"Could not find a YouTube video ID in {a.video!r}.", EXIT_BAD_INPUT)
     warnings = []
-    segments, source = parse_transcript_text(text, warnings)
+    try:
+        segments, source = parse_transcript_text(text, warnings)
+    except ParseError as exc:
+        die(str(exc), EXIT_BAD_INPUT)
     for message in warnings:
         log.warning("%s", message)
     if not segments:
@@ -917,11 +1389,21 @@ def cmd_cleanup(a):
     if not store.is_dir():
         print("Nothing to clean: the transcript store does not exist yet.")
         return 0
-    if custom_storage() and not (store / STORE_MARKER).is_file():
-        print("Cleanup skipped: the folder in TUBEGPT_STORAGE_DIR was not created by tubeGPT (it has no "
-              f"{STORE_MARKER} marker file), so none of its files were touched.")
+    allowed, reason = cleanup_allowed(store)
+    if not allowed and reason == "optin":
+        print("Cleanup skipped: TUBEGPT_STORAGE_DIR points at your own folder, and nothing there is deleted unless "
+              "you also set TUBEGPT_STORAGE_CLEANUP=1. No files were touched.")
         return 0
-    result = cleanup_store(store, dry_run=a.dry_run)
+    if not allowed:
+        print("Cleanup skipped: the folder in TUBEGPT_STORAGE_DIR has no valid tubeGPT marker file "
+              f"({STORE_MARKER}), so it is not treated as a tubeGPT store. No files were touched.")
+        return 0
+    # Hold the same lock as save and read, so a transcript cannot be refreshed between the final re-check and the
+    # delete. If the lock is unavailable, cleanup still re-checks every file before removing it.
+    with store_lock(store) as locked:
+        if not locked:
+            log.debug("event=cleanup_without_lock")
+        result = cleanup_store(store, dry_run=a.dry_run)
     verb = "Would remove" if a.dry_run else "Removed"
     print(f"{verb} {result['expired']} expired and {result['over_limit']} surplus transcript file(s) "
           f"({result['freed_bytes']} bytes). {result['remaining']} file(s) remain.")
@@ -946,6 +1428,8 @@ def cmd_show(a):
     used, printed = 0, 0
     for i in chosen:
         line = f"{seg_label(doc, i)} {doc['segments'][i]['text']}"
+        if len(line) > a.max_chars:
+            line = limit_text(line, a.max_chars)
         if printed and used + len(line) + 1 > a.max_chars:
             nxt = seg_pos(doc, i)
             nxt_arg = f"{int(nxt * 1000) / 1000:.3f}" if doc.get("has_timestamps") else str(i)
@@ -958,6 +1442,69 @@ def cmd_show(a):
     return 0
 
 
+def limit_text(text: str, limit: int) -> str:
+    """Cut ``text`` to ``limit`` characters and say how much was left out."""
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]} [... cut; {len(text) - limit} more characters. Raise --max-chars to see them.]"
+
+
+def iter_hits(segs, terms):
+    """Yield, in order, the index of every segment in which any term starts.
+
+    A match may run on into the following segments (a phrase said across two captions), so each segment is
+    searched together with just enough of what follows. Nothing is joined into one big string.
+    """
+    longest = max(len(t) for t in terms)
+    n = len(segs)
+    window = collections.deque()  # lowered text of segment i and of the segments after it
+    after = 0  # characters in window beyond its first entry, separators included
+    loaded = 0
+    for i in range(n):
+        while loaded < n and (loaded <= i or after < longest):
+            lowered = segs[loaded]["text"].lower()
+            if window:
+                after += len(lowered) + 1
+            window.append(lowered)
+            loaded += 1
+        low = window[0]
+        tail = low
+        if len(window) > 1:
+            tail = low + " " + " ".join(itertools.islice(window, 1, None))[:longest]
+        for needle in terms:
+            if tail.find(needle, 0, len(low) + len(needle) - 1) >= 0:
+                yield i
+                break
+        window.popleft()
+        if window:
+            after -= len(window[0]) + 1  # the next segment becomes the current one, no longer "after"
+
+
+def search_windows(hits, n, context):
+    """Group hits into non-overlapping windows of ``context`` segments on each side.
+
+    Hits whose windows overlap share one window (up to a bounded size); otherwise the later window is trimmed so
+    no segment is ever listed twice. Yields (first line, last line, [hit indexes]).
+    """
+    cap = 4 * context + 1
+    cur = None
+    for h in hits:
+        lo, hi = max(0, h - context), min(n - 1, h + context)
+        if cur is not None:
+            if h <= cur[1]:  # already inside the previous window
+                cur[2].append(h)
+                continue
+            if lo <= cur[1] and hi - cur[0] + 1 <= cap:
+                cur[1] = hi
+                cur[2].append(h)
+                continue
+            lo = max(lo, cur[1] + 1)
+            yield tuple(cur)
+        cur = [lo, hi, [h]]
+    if cur is not None:
+        yield tuple(cur)
+
+
 def cmd_search(a):
     terms = [re.sub(r"\s+", " ", t.strip().lower()) for t in a.terms]
     terms = [t for t in terms if t]
@@ -967,38 +1514,35 @@ def cmd_search(a):
         die(f"Too many search terms ({len(terms)}); the limit is {MAX_TERMS}.", EXIT_BAD_INPUT)
     doc, _ = load_doc(a.src)
     segs = doc["segments"]
-    lowered = [s["text"].lower() for s in segs]
-    offsets, pos = [], 0
-    for t in lowered:
-        offsets.append(pos)
-        pos += len(t) + 1
-    full = " ".join(lowered)
+    timed = doc.get("has_timestamps") and doc.get("video_id")
 
-    hits = set()
-    for needle in terms:
-        k = full.find(needle)
-        while k >= 0:
-            hits.add(bisect.bisect_right(offsets, k) - 1)
-            k = full.find(needle, k + 1)
-    if not hits:
-        print("No matches for: " + ", ".join(repr(t) for t in a.terms) +
-              "\n(Try other wording or synonyms. Auto-generated captions can also misspell names and terms.)")
-        return 0
+    def place(idx):
+        where = seg_label(doc, idx)
+        return where + " " + link_url(doc["video_id"], segs[idx]["start"]) if timed else where
 
-    reported, last = 0, None
-    for idx in sorted(hits):
-        if last is not None and idx - last <= a.context:
-            continue  # already inside the previous hit's context window
+    reported, used, found = 0, 0, False
+    for lo, hi, hit_list in search_windows(iter_hits(segs, terms), len(segs), a.context):
+        found = True
         if reported >= a.max:
             print(f"[... more matches exist; showing the first {a.max}. Narrow the terms or raise --max.]")
-            break
-        window = " ".join(s["text"] for s in segs[max(0, idx - a.context): idx + a.context + 1])
-        where = seg_label(doc, idx)
-        if doc.get("has_timestamps") and doc.get("video_id"):
-            where += " " + link_url(doc["video_id"], segs[idx]["start"])
-        print(f"{where}\n    {window}")
+            return 0
+        header = place(hit_list[0])
+        if len(hit_list) > 1:
+            more = ", ".join(place(h) for h in hit_list[1:4])
+            rest = len(hit_list) - 4
+            header += f"  (also: {more}{f', and {rest} more' if rest > 0 else ''})"
+        body = " ".join(segs[j]["text"] for j in range(lo, hi + 1))
+        block = f"{header}\n    {limit_text(body, a.max_chars)}"
+        if reported and used + len(block) + 1 > a.max_chars:
+            print("[... more matches exist; stopped because of the --max-chars output limit. "
+                  "Narrow the terms or raise --max-chars.]")
+            return 0
+        print(block)
+        used += len(block) + 1
         reported += 1
-        last = idx
+    if not found:
+        print("No matches for: " + ", ".join(repr(t) for t in a.terms) +
+              "\n(Try other wording or synonyms. Auto-generated captions can also misspell names and terms.)")
     return 0
 
 
@@ -1022,7 +1566,7 @@ def cmd_link(a):
 def bounded_int(lo: int, hi: int):
     """argparse type: a plain integer within [lo, hi], with an understandable message otherwise."""
     def convert(text: str) -> int:
-        if not re.fullmatch(r"[+-]?[0-9]+", text.strip()):
+        if len(text) > 12 or not re.fullmatch(r"[+-]?[0-9]+", text.strip()):
             raise argparse.ArgumentTypeError(f"{text!r} is not a whole number")
         value = int(text)
         if value < 0 <= lo:
@@ -1104,6 +1648,8 @@ def build_parser():
                     help="neighbouring lines to show on each side (0-50, default 2)")
     se.add_argument("--max", type=bounded_int(1, 1000), default=15,
                     help="maximum places to show (1-1000, default 15)")
+    se.add_argument("--max-chars", type=bounded_int(1, 1_000_000), default=30000,
+                    help="stop after about this many characters of output (1-1000000, default 30000)")
     se.set_defaults(func=cmd_search)
 
     li = sub.add_parser("link", help="make markdown timestamp links")
@@ -1158,7 +1704,9 @@ def main(argv=None):
             pass
         return EXIT_ERROR
     except Exception as exc:  # last resort: every known failure above exits through die() with its own code
-        log.debug("event=unexpected_error", exc_info=True)
+        # Log only the exception type and where it happened: its message could contain input text or paths.
+        where = ",".join(f"{Path(f.filename).name}:{f.lineno}" for f in traceback.extract_tb(exc.__traceback__)[-3:])
+        log.debug("event=unexpected_error type=%s where=%s", type(exc).__name__, where)
         die(f"Unexpected internal error ({type(exc).__name__}). Re-run with --verbose for details.", EXIT_ERROR)
 
 

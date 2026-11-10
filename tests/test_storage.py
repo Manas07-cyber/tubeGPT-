@@ -23,7 +23,8 @@ def make_store(tr, store, files, now=None):
 
 
 def names(store):
-    return sorted(p.name for p in store.iterdir())
+    """Transcript-store file names, without tubeGPT's own lock file (checked separately)."""
+    return sorted(p.name for p in store.iterdir() if p.name != ".tubegpt-lock")
 
 
 def vid(n):
@@ -180,15 +181,27 @@ def test_custom_storage_folder_needs_marker_before_any_deletion(tr, tmp_path, mo
     assert foreign.read_text() == "user data"
 
 
-def test_custom_storage_folder_created_by_us_gets_marker_and_cleanup_works(tr, tmp_path, monkeypatch):
+def test_custom_storage_folder_created_by_us_gets_marker_and_cleanup_works_once_opted_in(tr, tmp_path, monkeypatch):
     mine = tmp_path / "fresh-store"
     monkeypatch.setenv("TUBEGPT_STORAGE_DIR", str(mine))
+    monkeypatch.setenv("TUBEGPT_STORAGE_CLEANUP", "1")
     monkeypatch.setattr(tr, "default_dir", lambda: mine)
     tr.ensure_store()
     assert (mine / tr.STORE_MARKER).is_file()
     make_store(tr, mine, {f"{vid(1)}.json": (48, 5)})
     tr.cleanup_store(mine)
     assert not (mine / f"{vid(1)}.json").exists()
+
+
+def test_custom_storage_folder_is_never_cleaned_without_the_explicit_opt_in(tr, tmp_path, monkeypatch):
+    mine = tmp_path / "fresh-store"
+    monkeypatch.setenv("TUBEGPT_STORAGE_DIR", str(mine))
+    monkeypatch.setattr(tr, "default_dir", lambda: mine)
+    tr.ensure_store()                                                # marker exists, but cleanup was not requested
+    assert (mine / tr.STORE_MARKER).is_file()
+    make_store(tr, mine, {f"{vid(1)}.json": (48, 5)})
+    result = tr.cleanup_store(mine)
+    assert (mine / f"{vid(1)}.json").exists() and result["expired"] == 0
 
 
 # ---------------------------------------------------------------- automatic cleanup and usage
@@ -361,16 +374,29 @@ def test_hash_named_store_files_match_what_cleanup_expects(tr, run, tmp_path, do
     f = tmp_path / "n.txt"
     f.write_text(docs.PLAIN, encoding="utf-8")
     run("parse", str(f))
-    (name,) = [n for n in names(isolated_tmp)]
+    (name,) = names(isolated_tmp)
     assert tr.STORE_FILE_RE.match(name)
 
 
-def test_cleanup_command_says_so_when_it_skips_an_unmarked_custom_folder(run, tr, tmp_path, monkeypatch):
+def test_cleanup_command_names_the_opt_in_when_a_custom_folder_is_not_enabled(run, tr, tmp_path, monkeypatch):
     mine = tmp_path / "my-own-folder"
     mine.mkdir()
     (mine / "keepme.json").write_text("{}", encoding="utf-8")
     monkeypatch.setenv("TUBEGPT_STORAGE_DIR", str(mine))
     monkeypatch.setattr(tr, "default_dir", lambda: mine)    # the shared fixture redirects the store per test
     code, out, _ = run("cleanup")
-    assert code == 0 and "Cleanup skipped" in out and "none of its files were touched" in out
+    assert code == 0 and "Cleanup skipped" in out and "TUBEGPT_STORAGE_CLEANUP=1" in out
+    assert "Removed" not in out                              # never a misleading success line
+    assert [p.name for p in mine.iterdir()] == ["keepme.json"]
+
+
+def test_cleanup_command_says_so_when_an_enabled_custom_folder_has_no_marker(run, tr, tmp_path, monkeypatch):
+    mine = tmp_path / "my-own-folder"
+    mine.mkdir()
+    (mine / "keepme.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("TUBEGPT_STORAGE_DIR", str(mine))
+    monkeypatch.setenv("TUBEGPT_STORAGE_CLEANUP", "1")
+    monkeypatch.setattr(tr, "default_dir", lambda: mine)
+    code, out, _ = run("cleanup")
+    assert code == 0 and "Cleanup skipped" in out and tr.STORE_MARKER in out and "Removed" not in out
     assert [p.name for p in mine.iterdir()] == ["keepme.json"]

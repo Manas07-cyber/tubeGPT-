@@ -214,10 +214,13 @@ def test_unexpected_exceptions_become_a_controlled_exit(run, tr, saved, monkeypa
     assert "Traceback" not in err and "/home/someone" not in err
 
 
-def test_verbose_shows_the_traceback_for_unexpected_errors(run, tr, saved, monkeypatch):
-    monkeypatch.setattr(tr, "load_doc", lambda src: (_ for _ in ()).throw(RuntimeError("x")))
+def test_verbose_logs_where_an_unexpected_error_happened_but_never_its_message(run, tr, saved, monkeypatch):
+    # Deliberate change from the first hardening round: a full traceback can carry the exception message (which
+    # might hold input text) and absolute paths, so verbose mode now logs only the type and file:line frames.
+    monkeypatch.setattr(tr, "load_doc", lambda src: (_ for _ in ()).throw(RuntimeError("SECRET-TRANSCRIPT-TEXT")))
     code, _, err = run("-v", "show", saved)
-    assert code == 1 and "Traceback" in err
+    assert code == 1 and "event=unexpected_error type=RuntimeError where=" in err
+    assert "Traceback" not in err and "SECRET-TRANSCRIPT-TEXT" not in err and "/tmp/" not in err
 
 
 def test_keyboard_interrupt_exits_130(run, tr, saved, monkeypatch):

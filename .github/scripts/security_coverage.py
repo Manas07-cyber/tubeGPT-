@@ -13,10 +13,16 @@ import sys
 from pathlib import Path
 
 SCRIPT = "skills/youtube-conversation/scripts/transcript.py"
-OVERALL_FLOOR = 0
-DEFAULT_FLOOR = 0
-# function name -> minimum percentage of its executable lines that tests must run
-FLOORS = {}
+OVERALL_FLOOR = 88
+DEFAULT_FLOOR = 90
+# function name -> minimum percentage of its executable lines that tests must run. Set on 2026-11-10 a few points
+# below what CI measured on Linux / Python 3.13 (secure_store_files 67.9, _remove_if_unchanged 70.8, ...; the
+# unrun lines are mostly OS-error branches). Raise a floor when coverage rises; never lower one to pass a run.
+FLOORS = {
+    "secure_store_files": 62, "_remove_if_unchanged": 65, "_tighten_dir": 75, "scrub": 75, "write_json_atomic": 78,
+    "load_doc": 82, "_scan_store": 82, "classify_error": 82, "store_file": 82, "_read_validated": 86,
+    "read_input_text": 88, "cleanup_store": 88, "ensure_store": 88,
+}
 CRITICAL = [
     # storage
     "ensure_store", "_tighten_dir", "secure_store_files", "_open_regular", "marker_is_valid", "_write_marker",

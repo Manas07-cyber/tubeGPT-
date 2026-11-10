@@ -47,7 +47,7 @@ Windows PowerShell:
 
 ```powershell
 python -m venv .venv
-.venv\Scripts\Activate.ps1
+.venv\\Scripts\\Activate.ps1
 python -m pip install -r requirements.txt
 ```
 
@@ -59,7 +59,7 @@ source .venv/bin/activate
 python -m pip install -r requirements.txt
 ```
 
-Leave the environment with `deactivate`; delete the `.venv` folder to remove it. If PowerShell blocks `Activate.ps1`, run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`, or use `.venv\Scripts\activate.bat` in Command Prompt.
+Leave the environment with `deactivate`; delete the `.venv` folder to remove it. If PowerShell blocks `Activate.ps1`, run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`, or use `.venv\\Scripts\\activate.bat` in Command Prompt.
 
 Example commands (from the repository root):
 
@@ -112,7 +112,11 @@ Respect copyright, platform terms, privacy, and access controls. Only provide tr
 
 ## License
 
-No open-source license has been selected for this repository yet. Until a license is added, do not assume that the source is licensed for reuse, redistribution, or modification.
+tubeGPT is licensed under the [MIT License](LICENSE).
+
+Copyright (c) 2026 Manas D.
+
+The MIT License applies to the original project materials covered by this repository's copyright notice. Third-party dependencies, tools, and assets remain subject to their respective licences and notices.
 
 ## Contact and support
 

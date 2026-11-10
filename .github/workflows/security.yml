@@ -34,10 +34,10 @@ jobs:
         with:
           fetch-depth: 0              # the whole history, so old commits are scanned too
           persist-credentials: false
-      - name: Build gitleaks v8.30.1 (module version pinned; Go verifies it against its checksum database)
+      - name: Build gitleaks v8.30.1 (module version pinned; v8.30.1 still declares its old module path zricethezav; Go verifies it against its checksum database)
         run: |
           go version
-          GOBIN="$RUNNER_TEMP/bin" go install github.com/gitleaks/gitleaks/v8@v8.30.1
+          GOBIN="$RUNNER_TEMP/bin" go install github.com/zricethezav/gitleaks/v8@v8.30.1
           "$RUNNER_TEMP/bin/gitleaks" version
       - name: Scan every commit (secret values are redacted in the output)
         run: '"$RUNNER_TEMP/bin/gitleaks" git --redact --no-banner --verbose .'

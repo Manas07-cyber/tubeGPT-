@@ -41,7 +41,7 @@ For developers, see the project files and the skill documentation in this reposi
 
 ### Developer setup
 
-Requirements: Python 3.9 or newer. Run these commands from the repository root (the folder that contains `requirements.txt`). Use a standard virtual environment; no administrator rights are needed, and `sudo pip` or `--break-system-packages` should never be used.
+Requirements: **Python 3.11 or newer**. CI tests Python 3.11, 3.12, 3.13, 3.14 and 3.15 on Linux, and Python 3.11 and 3.15 on Windows and macOS. Python 3.9 and 3.10 are past their upstream end-of-life (see the [Python release schedule](https://devguide.python.org/versions/)) and are neither supported nor tested; the script uses language features that need 3.10 or newer. If you must run an older Python, that is your own responsibility and receives no upstream security fixes. Run these commands from the repository root (the folder that contains `requirements.txt`). Use a standard virtual environment; no administrator rights are needed, and `sudo pip` or `--break-system-packages` should never be used.
 
 Windows PowerShell:
 
@@ -65,7 +65,7 @@ For a reproducible install that uses the exact dependency versions CI tests, add
 python -m pip install -r requirements-dev.txt -c constraints.txt
 ```
 
-Normal installs use `requirements.txt` alone and therefore receive newer compatible releases, including security fixes. The pins are a snapshot that CI proves works on Python 3.9, 3.11 and 3.13; they are refreshed manually.
+Normal installs use `requirements.txt` alone and therefore receive newer compatible releases, including security fixes. The pins are a snapshot that CI installs and tests on Python 3.11 to 3.15 (Linux, Windows and macOS); Dependabot proposes updates weekly and every proposal must pass CI before it is merged. A manual `resolve-pins` job prints the newest compatible versions when you want to refresh them by hand.
 
 Leave the environment with `deactivate`; delete the `.venv` folder to remove it. If PowerShell blocks `Activate.ps1`, run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`, or use `.venv\Scripts\activate.bat` in Command Prompt.
 
@@ -83,7 +83,7 @@ Only `fetch` needs internet access. The skill's own instructions run the same sc
 
 ### Common environment problems
 
-- `python` or `python3` not found: install Python 3.9 or newer from python.org (or your system package manager) and reopen the terminal. On Windows the launcher `py -3 -m venv .venv` also works.
+- `python` or `python3` not found: install Python 3.11 or newer from python.org (or your system package manager) and reopen the terminal. On Windows the launcher `py -3 -m venv .venv` also works.
 - `Activate.ps1 cannot be loaded` (PowerShell): see the execution-policy note above.
 - `No such file or directory: requirements.txt`: you are not in the repository root. `cd` into the folder that contains `requirements.txt` first.
 - `externally-managed-environment`: this means you are installing outside a virtual environment. Activate `.venv` and run `python -m pip install -r requirements.txt` again; do not override the protection.
@@ -114,7 +114,13 @@ python -m pip check
 python -m pytest -q tests/test_manifests.py tests/test_dependencies.py tests/test_repo_hygiene.py tests/test_docs.py
 ```
 
-GitHub Actions (`.github/workflows/tests.yml`) runs on every push to `main` and every pull request, on Python 3.9, 3.11 and 3.13, with read-only permissions: dependency install from `constraints.txt` and `pip check`, compilation, `ruff` (style, bugbear and security rules), manifest validation, repository security checks (secret patterns, forbidden files, no shell/subprocess/`eval`, only YouTube hosts), documentation link and consistency checks, and the full test suite. Three further jobs run only when started by hand from the Actions tab and never on push or pull request, so ordinary CI never depends on YouTube, GitHub Pages or a vulnerability database being reachable: `live-fetch` (one real transcript fetch), `pages-check` (the public pages and their links) and `dependency-audit` (`pip-audit` on the runtime dependencies).
+GitHub Actions run on every push to `main` and every pull request, with the workflow token limited to read-only access, checkout credentials not persisted, every third-party Action pinned to a full commit SHA (the comment after each SHA names the release), and a timeout on every job:
+
+- `tests.yml`: a static job (dependency install from `constraints.txt`, `pip check`, compilation, `ruff` with style, bugbear and security rules, and the manifest-schema, dependency, repository-hygiene, documentation and workflow tests), the full suite with coverage on Linux for Python 3.11, 3.12, 3.13, 3.14 and 3.15, and the full suite on Windows and macOS for Python 3.11 and 3.15. Tests that need POSIX permissions, symbolic links or user IDs are marked and skipped on Windows with a stated reason. The remaining jobs run only when started by hand from the Actions tab and never on push or pull request, so ordinary CI never depends on YouTube, GitHub Pages or a vulnerability database being reachable: `live-fetch` (one real transcript fetch), `pages-check` (the public pages and their links) and `resolve-pins`.
+- `security.yml`: secret scanning with gitleaks over the whole Git history and the current files (secret values are redacted in the output), `pip-audit` of the pinned runtime and development dependencies and of the freshly resolved runtime dependencies, validation of `plugin.json` against the published Agent Plugins schema, and the same checks weekly so new advisories surface without a code change.
+- `.github/dependabot.yml` proposes weekly updates for Python packages and GitHub Actions; it never merges anything.
+
+Not covered by CI: behaviour inside ChatGPT's own sandbox, Python versions other than those listed, and Windows or macOS beyond the jobs above.
 
 ## Storage and retention
 

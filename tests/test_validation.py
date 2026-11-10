@@ -219,3 +219,13 @@ def test_very_large_transcript_works_end_to_end(run, tr, tmp_path):
     code, out, _ = run("show", str(path), "--stats")
     assert code == 0 and f"segments: {n}" in out
     assert time.monotonic() - started < 30                           # generous: only catches quadratic behaviour
+
+
+def test_huge_integer_in_saved_json_gives_a_plain_message_not_pythons_internal_text(tr, tmp_path, capsys):
+    path = tmp_path / "huge.json"
+    path.write_text('{"segments":[{"start":' + "9" * 5000 + ',"text":"x"}]}', encoding="utf-8")
+    with pytest.raises(SystemExit) as exc:
+        tr.load_doc(str(path))
+    assert exc.value.code == tr.EXIT_BAD_INPUT
+    err = capsys.readouterr().err
+    assert "too many digits" in err and "set_int_max_str_digits" not in err

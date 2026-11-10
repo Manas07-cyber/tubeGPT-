@@ -233,3 +233,17 @@ def test_broken_pipe_is_not_reported_as_a_crash(run, tr, saved, monkeypatch):
     monkeypatch.setattr(tr, "load_doc", lambda src: (_ for _ in ()).throw(BrokenPipeError()))
     code, _, err = run("show", saved)
     assert code == 1 and "Traceback" not in err
+
+
+def test_old_python_gets_a_clear_message_not_a_traceback():
+    """On Python older than 3.11 the script exits with an instruction (checked by running it with a faked version)."""
+    import subprocess
+    import sys
+    from pathlib import Path
+    script = Path(__file__).resolve().parents[1] / "skills" / "youtube-conversation" / "scripts" / "transcript.py"
+    code = ("import runpy, sys; sys.version_info = (3, 9, 0, 'final', 0); "
+            f"runpy.run_path({str(script)!r}, run_name='tubegpt_old_python_check')")
+    proc = subprocess.run([sys.executable, "-I", "-c", code], capture_output=True, text=True, timeout=60)  # noqa: S603
+    assert proc.returncode == 1
+    assert "needs Python 3.11 or newer" in proc.stderr or "needs Python 3.11 or newer" in proc.stdout
+    assert "Traceback" not in proc.stderr

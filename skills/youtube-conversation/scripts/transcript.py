@@ -56,6 +56,10 @@ import traceback
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
 
+if sys.version_info < (3, 11):  # a clear message instead of a traceback from a newer language feature
+    sys.exit(f"tubeGPT needs Python 3.11 or newer; this is Python {sys.version_info[0]}.{sys.version_info[1]}. "
+             "Install a current Python (see README.md, Developer setup) and run the command again.")
+
 try:  # POSIX advisory file locks
     import fcntl
 except ImportError:  # Windows
@@ -877,6 +881,8 @@ def _read_validated(fd, info, name):
             detail = "its JSON is nested too deeply"
         elif isinstance(exc, OverflowError):
             detail = "it contains a number that is too large"
+        elif "digits" in str(exc) and "integer" in str(exc):  # Python's limit on converting huge integers
+            detail = "it contains a number with far too many digits"
         else:  # InvalidDocument, or the invalid-number ValueError raised by _reject_constant
             detail = str(exc)
         die(f"{name} is not a saved transcript: {detail}. "
@@ -1076,7 +1082,7 @@ def parse_cues(text: str, warnings=None):
             duplicates += 1  # exact duplicate cue
             continue
         segments.append({"start": start, "end": end, "text": text_out})
-    if any(b["start"] < a["start"] for a, b in zip(segments, segments[1:])):
+    if any(b["start"] < a["start"] for a, b in zip(segments, segments[1:], strict=False)):
         segments.sort(key=lambda seg: seg["start"])  # stable: equal starts keep their file order
         adjusted += 1
     if warnings is not None:
@@ -1150,10 +1156,14 @@ def parse_transcript_text(text: str, warnings=None):
         raise ParseError(f"The text has {timing_lines} caption timing line(s) (\"-->\") but none could be read, "
                          "so it was not imported as plain text. Check the timestamps, for example "
                          "00:01:02.500 --> 00:01:04.000.")
-    if sum(1 for line in lines if PANEL_RE.match(line)) >= 2:
+    panel_lines = sum(1 for line in lines if PANEL_RE.match(line))
+    if panel_lines >= 2:
         segs = parse_panel(lines, warnings)
         if segs:
             return segs, "pasted transcript (with timestamps)"
+        raise ParseError(f"The text has {panel_lines} lines that start like timestamps but none could be read, so "
+                         "it was not imported as plain text. Check them, for example 12:34 or 1:02:03 "
+                         "(minutes and seconds must be below 60).")
     return parse_plain(text), "pasted text (no timestamps)"
 
 
@@ -1253,7 +1263,7 @@ def segments_from_raw(raw):
             skipped += 1
             continue
         segments.append({"start": start, "end": min(start + duration, float(MAX_SECONDS)), "text": text})
-    if any(b["start"] < a["start"] for a, b in zip(segments, segments[1:])):
+    if any(b["start"] < a["start"] for a, b in zip(segments, segments[1:], strict=False)):
         segments.sort(key=lambda seg: seg["start"])
     return segments, skipped
 

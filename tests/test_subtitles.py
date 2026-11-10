@@ -263,3 +263,14 @@ def test_large_subtitle_file_parses_in_reasonable_time(tr):
                    f"line number {i}\n\n" for i in range(20_000))
     segs, source = tr.parse_transcript_text(cues)
     assert len(segs) > 10_000 and "caption file" in source
+
+
+def test_unreadable_timestamp_lines_are_an_error_not_plain_text(tr):
+    """Two or more lines that start like timestamps but cannot be read must not become misleading plain text."""
+    with pytest.raises(tr.ParseError, match="none could be read"):
+        tr.parse_transcript_text("99:99 first\n99:99 second\n")
+    # a normal pasted panel and ordinary prose still work
+    segs, kind = tr.parse_transcript_text("0:01 hello\n0:05 world\n")
+    assert [s["start"] for s in segs] == [1.0, 5.0] and "timestamps" in kind
+    segs, kind = tr.parse_transcript_text("just a sentence\nanother one\n")
+    assert segs[0]["start"] is None

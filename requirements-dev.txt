@@ -1,3 +1,8 @@
+# Development and test dependencies. Install with the exact versions CI uses:
+#   python -m pip install -r requirements-dev.txt -c constraints.txt
 -r requirements.txt
 pytest>=8,<10
+# coverage reporting (.coveragerc) and validation of the plugin manifest against its published JSON schema
+pytest-cov>=6,<8
+jsonschema>=4.20,<5
 ruff>=0.16,<1

@@ -1,0 +1,11 @@
+# Coverage of the helper script (the only product code). Used by: python -m pytest --cov
+# Subprocess runs (the multi-process storage tests) are not measured, so the figures are in-process coverage.
+[run]
+branch = True
+source = skills/youtube-conversation/scripts
+
+[report]
+show_missing = True
+skip_empty = True
+exclude_also =
+    if __name__ == .__main__.:

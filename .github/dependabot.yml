@@ -1,0 +1,20 @@
+# Proposes dependency updates as pull requests (it never merges anything). Takes effect once this file is on
+# the default branch. Each proposal runs the full CI, which is what decides whether a new version is accepted.
+version: 2
+updates:
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      python-dependencies:
+        patterns: ["*"]
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      github-actions:
+        patterns: ["*"]

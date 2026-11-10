@@ -1,0 +1,97 @@
+name: security
+
+# Secret scanning, dependency vulnerability audit and live manifest-schema validation.
+# Runs on pushes to main, on pull requests, weekly (new advisories appear without any code change) and by hand.
+# Actions are pinned to full commit SHAs; the comment after each SHA names the release it is.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "23 5 * * 1"
+  workflow_dispatch:
+
+# Read-only: nothing here writes to the repository or posts anywhere.
+permissions: {}
+
+concurrency:
+  group: security-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+jobs:
+  secret-scan:
+    name: secret scan (gitleaks, full history and working tree)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0              # the whole history, so old commits are scanned too
+          persist-credentials: false
+      - name: Build gitleaks v8.30.1 (module version pinned; Go verifies it against its checksum database)
+        run: |
+          go version
+          GOBIN="$RUNNER_TEMP/bin" go install github.com/gitleaks/gitleaks/v8@v8.30.1
+          "$RUNNER_TEMP/bin/gitleaks" version
+      - name: Scan every commit (secret values are redacted in the output)
+        run: '"$RUNNER_TEMP/bin/gitleaks" git --redact --no-banner --verbose .'
+      - name: Scan the current files, including configuration and documentation (binary files are skipped by gitleaks)
+        run: '"$RUNNER_TEMP/bin/gitleaks" dir --redact --no-banner --verbose .'
+
+  dependency-audit:
+    name: dependency audit (pip-audit)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - name: Install the scanner in its own environment (pinned)
+        run: |
+          python -m pip install -r requirements-ci.txt
+          python -m venv "$RUNNER_TEMP/audit"
+          "$RUNNER_TEMP/audit/bin/python" -m pip install -r requirements-audit.txt
+      - name: Audit exactly what CI installs (runtime and development packages, as pinned in constraints.txt)
+        run: >
+          "$RUNNER_TEMP/audit/bin/pip-audit" -r constraints.txt --no-deps --disable-pip --desc on
+      - name: Audit what a normal user receives (requirements.txt resolved to the newest compatible versions)
+        run: >
+          "$RUNNER_TEMP/audit/bin/pip-audit" -r requirements.txt --desc on
+
+  # Validates plugin.json against the published schema it names. It downloads the schema, so it needs network
+  # access to agent-plugins.org (three attempts); the offline suite uses a reconstructed copy of it.
+  manifest-schema-live:
+    name: manifest schema (published Agent Plugins schema)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - name: Install
+        run: |
+          python -m pip install -r requirements-ci.txt
+          python -m pip install -r requirements-dev.txt
+      - name: Download the published schema
+        run: >
+          curl --fail --silent --show-error --location --retry 3 --max-time 30
+          --output "$RUNNER_TEMP/plugin.schema.json"
+          https://agent-plugins.org/schemas/1.0.0/plugin.schema.json
+      - name: Validate plugin.json against it
+        run: TUBEGPT_SCHEMA_FILE="$RUNNER_TEMP/plugin.schema.json" python -m pytest -q -rs tests/test_manifests.py

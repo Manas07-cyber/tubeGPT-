@@ -1,5 +1,6 @@
 """Plugin manifest validation: syntax, required fields, naming schema, consistency and referenced files."""
 import json
+import os
 import re
 from pathlib import Path
 
@@ -95,3 +96,56 @@ def test_attribution_and_disclaimers_in_long_description(plugin):
     text = iface(plugin)["longDescription"]
     assert "not affiliated with or endorsed by YouTube or Google" in text
     assert "timestamp" in text.lower()
+
+
+# --------------------------------------------------------------------------------------------------
+# Validation against the Agent Plugins JSON schema (the one plugin.json names in its "$schema" field).
+#
+# The offline suite uses tests/schemas/agent-plugins-1.0.0.reconstructed.schema.json, a copy rebuilt from the
+# structure of the published schema. CI also downloads the real file and points TUBEGPT_SCHEMA_FILE at it (job
+# "manifest-schema-live"), so the same tests then run against the authoritative schema.
+# .codex-plugin/plugin.json has no published schema that I could find (OpenAI documents it only as a
+# compatibility fallback), so that file is checked by the consistency tests above, not by a schema.
+# --------------------------------------------------------------------------------------------------
+RECONSTRUCTED_SCHEMA = ROOT / "tests" / "schemas" / "agent-plugins-1.0.0.reconstructed.schema.json"
+
+
+@pytest.fixture(scope="module")
+def validator():
+    jsonschema = pytest.importorskip("jsonschema")
+    path = Path(os.environ.get("TUBEGPT_SCHEMA_FILE") or RECONSTRUCTED_SCHEMA)
+    schema = json.loads(path.read_text(encoding="utf-8"))
+    jsonschema.Draft202012Validator.check_schema(schema)
+    return jsonschema.Draft202012Validator(schema)
+
+
+def test_the_root_manifest_names_the_schema_the_tests_use(plugin, validator):
+    assert plugin["$schema"] == validator.schema["$id"]
+
+
+def test_the_root_manifest_is_valid_against_the_agent_plugins_schema(plugin, validator):
+    errors = sorted(validator.iter_errors(plugin), key=lambda e: list(e.path))
+    assert not errors, [f"{'/'.join(map(str, e.path)) or '(root)'}: {e.message}" for e in errors]
+
+
+@pytest.mark.parametrize("change", [
+    {"name": "tubeGPT"},                      # uppercase: the exact mistake ChatGPT's importer rejected
+    {"name": "tube--gpt"}, {"name": "tube..gpt"}, {"name": "-tubegpt"}, {"name": "tubegpt-"}, {"name": ""},
+    {"name": "t" * 65}, {"name": "tube gpt"}, {"name": "tube_gpt"},
+    {"unexpected": "field"},                  # top-level additionalProperties is false
+    {"author": {"name": "x", "phone": "1"}},  # author additionalProperties is false
+    {"keywords": "not-a-list"}, {"keywords": [1]}, {"version": 1}, {"extensions": {"com.openai": "x"}},
+    {"$schema": "https://example.com/other.json"},
+])
+def test_the_schema_check_rejects_bad_manifests(plugin, validator, change):
+    assert list(validator.iter_errors({**plugin, **change})), f"{change} should have been rejected"
+
+
+@pytest.mark.parametrize("missing", ["$schema", "name"])
+def test_the_schema_requires_the_schema_and_name_fields(plugin, validator, missing):
+    assert list(validator.iter_errors({k: v for k, v in plugin.items() if k != missing}))
+
+
+def test_the_reconstructed_schema_is_labelled_as_such():
+    text = RECONSTRUCTED_SCHEMA.read_text(encoding="utf-8")
+    assert "RECONSTRUCTED" in text and "manifest-schema-live" in text

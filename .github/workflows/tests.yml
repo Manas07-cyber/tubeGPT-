@@ -45,18 +45,29 @@ jobs:
         run: python -m pytest -q -rs
 
   # Manual helper (Actions tab -> tests -> Run workflow): prints the newest versions that satisfy the declared
-  # requirements on each supported Python, so constraints.txt / requirements-ci.txt / requirements-audit.txt can be
-  # refreshed deliberately. It installs WITHOUT constraints on purpose and changes nothing in the repository.
+  # requirements on each supported Python and operating system, so constraints.txt, requirements-ci.txt and
+  # requirements-audit.txt can be refreshed deliberately. It installs WITHOUT constraints on purpose and changes
+  # nothing in the repository.
   resolve-pins:
     if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-24.04
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     permissions:
       contents: read
+    defaults:
+      run:
+        shell: bash
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12", "3.13", "3.14", "3.15"]
+        include:
+          - {os: ubuntu-24.04, python-version: "3.11"}
+          - {os: ubuntu-24.04, python-version: "3.13"}
+          - {os: ubuntu-24.04, python-version: "3.15"}
+          - {os: windows-2025, python-version: "3.11"}
+          - {os: windows-2025, python-version: "3.15"}
+          - {os: macos-15, python-version: "3.11"}
+          - {os: macos-15, python-version: "3.15"}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -68,11 +79,13 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip --version
-          python -m pip install -r requirements-dev.txt
-          echo "=== FREEZE-DEV python ${{ matrix.python-version }} ==="
+          grep -v '^-c ' requirements-dev.txt > .resolve-dev.txt
+          python -m pip install -r .resolve-dev.txt
+          echo "=== FREEZE-DEV ${{ matrix.os }} python ${{ matrix.python-version }} ==="
           python -m pip freeze --all
           echo "=== END-FREEZE-DEV ==="
       - name: Newest pip-audit in its own environment
+        if: runner.os == 'Linux'
         run: |
           python -m venv "$RUNNER_TEMP/audit-tool"
           "$RUNNER_TEMP/audit-tool/bin/python" -m pip install --upgrade pip pip-audit

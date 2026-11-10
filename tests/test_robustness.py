@@ -297,7 +297,7 @@ def test_search_windows_never_list_a_line_twice_and_cover_every_hit(tr, context)
         hits = sorted(rnd.sample(range(n), rnd.randint(1, min(n, 25))))
         windows = list(tr.search_windows(iter(hits), n, context))
         seen = set()
-        for lo, hi, hit_list in windows:
+        for lo, hi, _hits in windows:
             lines = set(range(lo, hi + 1))
             assert not lines & seen, (hits, windows)
             seen |= lines

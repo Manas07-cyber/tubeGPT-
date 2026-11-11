@@ -35,14 +35,20 @@ class Req(NamedTuple):
     branch: float  # minimum percentage of its branch arcs (if/else, loops, try/except exits) that tests must take
 
 
-# Requirements by risk. A tier is justified by what a defect in the function can cost:
-#   destructive: can delete or re-permission files, follow a link out of the store, or lose a transcript.
-#                A gap here is data loss or a path-safety hole, so almost every error path must be exercised.
+# Requirements by risk. A tier is justified by what a defect in the function can cost, and the numbers by what CI
+# measured on Linux / Python 3.13 (commit b4e73a7, 2026-11-11): every function listed below ran 100% of its lines;
+# destructive functions took 100% of their measurable branches; the lowest boundary function (split_text) took
+# 83.3% of its branches (the arcs left are the no-space-in-the-window split of unspaced text, run only by CJK input).
+#   destructive: can delete or re-permission files, follow a link out of the store, or lose a transcript. A gap here
+#                is data loss or a path-safety hole, so every error path must have been exercised: 95% of lines and
+#                90% of branches leaves room for one defensive line the OS makes unreachable, and nothing more.
 #   boundary:    parses or validates untrusted input, or builds error text. A gap here is a crash, a silently wrong
-#                import or a leaked path, but nothing is deleted.
+#                import or a leaked path, but nothing is deleted. Lines are held as high as destructive code; branches
+#                at 80%, just under the lowest measured value, because some parser arcs exist only for rare inputs.
+# These were first set to 90% / 80% before any measurement and only raised afterwards; never lower one to pass a run.
 TIERS = {
-    "destructive": Req(line=90, branch=80),
-    "boundary": Req(line=90, branch=80),
+    "destructive": Req(line=95, branch=90),
+    "boundary": Req(line=95, branch=80),
 }
 
 # qualified name -> tier
@@ -75,7 +81,8 @@ EXCEPTIONS = {
 }
 
 # Whole-file floors (from the report summary; the branch figure is covered_branches / num_branches).
-OVERALL = Req(line=90, branch=80)
+# Measured at the same commit: 97.9% of lines and 95.3% of branches for the whole file.
+OVERALL = Req(line=95, branch=90)
 
 # Calls that delete, rename over, re-permission or create files. A function that makes one must be in CRITICAL.
 _FS_MODULES = {"os", "shutil"}
@@ -237,6 +244,7 @@ def whole_file_failures(entry):
 
 
 def find_entry(report, source):
+    source = source.replace("\\", "/")  # a Windows path must match the report's forward-slash names too
     return next((v for k, v in report["files"].items() if k.replace("\\", "/").endswith(source)), None)
 
 

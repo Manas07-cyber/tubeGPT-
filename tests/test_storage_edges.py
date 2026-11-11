@@ -359,3 +359,24 @@ def test_a_timing_line_with_garbage_after_the_arrow_is_counted_as_skipped(tr):
     warnings = []
     assert [s["text"] for s in tr.parse_cues(srt, warnings)] == ["kept", "kept too"]
     assert any("Skipped 1 caption cue" in w for w in warnings)
+
+
+def test_a_timestamp_with_no_text_after_it_is_dropped_but_its_neighbours_are_kept(tr):
+    segments = tr.parse_panel(["0:01", "0:02 first words", "0:05", "0:06 more words"])
+    assert [(s["start"], s["text"]) for s in segments] == [(2.0, "first words"), (6.0, "more words")]
+
+
+def test_a_single_character_folder_is_not_replaced_in_error_text(tr, monkeypatch):
+    """A home folder of '/' would otherwise turn every slash in a message into '<folder>'."""
+    monkeypatch.setattr(pathlib.Path, "home", classmethod(lambda cls: pathlib.Path("/")))
+    assert tr.scrub("opened /a/b/c failed") == "opened /a/b/c failed"
+
+
+def test_the_rename_retry_gives_up_after_the_configured_number_of_attempts(tr, tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(os, "replace", lambda s, d: (calls.append(1), (_ for _ in ()).throw(PermissionError(13, "x")))[1])
+    monkeypatch.setattr(tr.time, "sleep", lambda s: None)
+    monkeypatch.setattr(tr, "_IS_POSIX", False)
+    with pytest.raises(PermissionError):
+        tr._replace("a", "b")
+    assert len(calls) == tr.REPLACE_ATTEMPTS

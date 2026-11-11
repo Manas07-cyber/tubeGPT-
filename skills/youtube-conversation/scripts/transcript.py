@@ -568,15 +568,13 @@ def store_lock(store, *, shared: bool = False, timeout: float = LOCK_TIMEOUT_S):
 
 def _replace(src, dst):
     """os.replace, retried briefly on Windows, where a virus scanner or indexer can hold the target for a moment."""
-    attempts = 1 if _IS_POSIX else REPLACE_ATTEMPTS
-    for attempt in range(attempts):
+    for attempt in range(0 if _IS_POSIX else REPLACE_ATTEMPTS - 1):
         try:
             os.replace(src, dst)
             return
         except PermissionError:
-            if attempt == attempts - 1:
-                raise
             time.sleep(0.05 * (attempt + 1))
+    os.replace(src, dst)  # the last attempt (the only one on POSIX): a failure is reported by the caller
 
 
 def write_json_atomic(path, doc):

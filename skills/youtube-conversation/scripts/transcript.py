@@ -113,6 +113,8 @@ MARKER_TEXT = ("tubeGPT transcript store v1\n"
 MARKER_PREFIX = "tubeGPT transcript store"
 LOCK_NAME = ".tubegpt-lock"
 LOCK_TIMEOUT_S = 10.0
+REPLACE_ATTEMPTS = 6  # Windows only: total wait about 0.75 s
+FETCH_TIMEOUT_S = 20  # per network request made by the transcript library; a silent connection fails instead of hanging
 # <video id>.json, or pasted-<hash>.json (32 hex characters from SHA-256; 8 characters were used by older versions)
 STORE_FILE_RE = re.compile(r"^(?:[A-Za-z0-9_-]{11}|pasted-(?:[0-9a-f]{8}|[0-9a-f]{32}))\.json$")
 TMP_FILE_RE = re.compile(r"^\.tmp-[a-z0-9_]{8}\.json$")
@@ -282,13 +284,14 @@ _O_BINARY = getattr(os, "O_BINARY", 0)  # Windows only: no newline translation
 
 
 class UnsafeStoreEntry(Exception):
-    """A store entry that is a symbolic link, not a regular file, or owned by another user."""
+    """A store entry that is a symbolic link, a hard link, not a regular file, or owned by another user."""
 
 
 def default_dir() -> Path:
     custom = os.environ.get("TUBEGPT_STORAGE_DIR", "").strip()
     if custom:
-        return Path(custom).expanduser()
+        # Made absolute (without resolving links) so a later command run from another folder uses the same store.
+        return Path(os.path.abspath(os.path.expanduser(custom)))
     return Path(tempfile.gettempdir()) / "youtube-conversation"
 
 
@@ -361,6 +364,8 @@ def _open_regular(path, flags=os.O_RDONLY, mode=0o600):
             raise UnsafeStoreEntry("not a regular file")
         if not _owned_by_me(info):
             raise UnsafeStoreEntry("owned by another user")
+        if info.st_nlink > 1:  # a generated transcript never has a second name; this is a planted hard link
+            raise UnsafeStoreEntry("hard link")
     except BaseException:
         os.close(fd)
         raise
@@ -401,7 +406,8 @@ def _tighten_dir(store):
     try:
         info = os.fstat(fd)
         if not _owned_by_me(info):
-            die("The transcript storage folder belongs to another user, so it was not used.", EXIT_STORAGE)
+            die("The transcript storage folder belongs to another user, so it was not used. "
+                "Set TUBEGPT_STORAGE_DIR to a folder of your own.", EXIT_STORAGE)
         if stat.S_IMODE(info.st_mode) & 0o077:
             os.fchmod(fd, 0o700)
     finally:
@@ -471,10 +477,14 @@ def ensure_store(create: bool = True) -> Path:
         if stat.S_ISLNK(info.st_mode):
             die("The transcript storage folder is a symbolic link, so it was not used. "
                 "Point TUBEGPT_STORAGE_DIR at the real folder.", EXIT_STORAGE)
+        if getattr(info, "st_reparse_tag", 0) == getattr(stat, "IO_REPARSE_TAG_MOUNT_POINT", 0xA0000003):
+            die("The transcript storage folder is a Windows junction, so it was not used. "
+                "Point TUBEGPT_STORAGE_DIR at the real folder.", EXIT_STORAGE)  # junctions are not S_ISLNK
         if not stat.S_ISDIR(info.st_mode):
             die("The transcript storage location exists but is not a folder.", EXIT_STORAGE)
         if not _owned_by_me(info):
-            die("The transcript storage folder belongs to another user, so it was not used.", EXIT_STORAGE)
+            die("The transcript storage folder belongs to another user, so it was not used. "
+                "Set TUBEGPT_STORAGE_DIR to a folder of your own.", EXIT_STORAGE)
         if custom and create and not marker_is_valid(store) and (created or not any(store.iterdir())):
             _write_marker(store)
         if not custom or marker_is_valid(store):
@@ -556,6 +566,19 @@ def store_lock(store, *, shared: bool = False, timeout: float = LOCK_TIMEOUT_S):
             os.close(fd)
 
 
+def _replace(src, dst):
+    """os.replace, retried briefly on Windows, where a virus scanner or indexer can hold the target for a moment."""
+    attempts = 1 if _IS_POSIX else REPLACE_ATTEMPTS
+    for attempt in range(attempts):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(0.05 * (attempt + 1))
+
+
 def write_json_atomic(path, doc):
     """Write JSON through a private temporary file in the same folder, then rename it into place.
 
@@ -575,7 +598,7 @@ def write_json_atomic(path, doc):
         fd, tmp_name = tempfile.mkstemp(prefix=".tmp-", suffix=".json", dir=path.parent)
         with os.fdopen(fd, "wb") as handle:
             handle.write(data)
-        os.replace(tmp_name, path)
+        _replace(tmp_name, path)
         tmp_name = None
     except OSError as exc:
         storage_error(exc, "save the transcript")
@@ -619,8 +642,8 @@ def _scan_store(store, dirfd):
                 info = _stat_entry(store, dirfd, entry.name)
             except OSError:
                 continue
-            if not stat.S_ISREG(info.st_mode) or not _owned_by_me(info):
-                continue  # links, folders and other users' files are never candidates
+            if not stat.S_ISREG(info.st_mode) or not _owned_by_me(info) or info.st_nlink > 1:
+                continue  # links, hard links, folders and other users' files are never candidates
             entries.append(_Entry(entry.name, info.st_mtime, info.st_size,
                                   (info.st_dev, info.st_ino, info.st_mtime_ns, info.st_size), is_tmp))
     return entries
@@ -639,7 +662,7 @@ def _remove_if_unchanged(store, dirfd, entry, now, min_age):
         log.warning("Could not re-check an old transcript file (%s).", type(exc).__name__)
         return False
     ident = (info.st_dev, info.st_ino, info.st_mtime_ns, info.st_size)
-    if not stat.S_ISREG(info.st_mode) or not _owned_by_me(info) or ident != entry.ident:
+    if not stat.S_ISREG(info.st_mode) or not _owned_by_me(info) or info.st_nlink > 1 or ident != entry.ident:
         log.debug("event=cleanup_skipped_changed")
         return False
     if now - info.st_mtime < min_age:
@@ -935,7 +958,8 @@ def load_doc(src: str):
                     fd, info = _open_regular(path)
                 except UnsafeStoreEntry as exc:
                     die(f"{path.name} was not used because it is not a regular transcript file owned by you "
-                        f"({exc}). Symbolic links in the transcript store are never followed.", EXIT_STORAGE)
+                        f"({exc}). Links and special files in the transcript store are never followed or used.",
+                        EXIT_STORAGE)
                 try:
                     if _IS_POSIX and stat.S_IMODE(info.st_mode) & 0o077 and (not custom_storage()
                                                                            or marker_is_valid(store)):
@@ -948,7 +972,9 @@ def load_doc(src: str):
             try:
                 fd, info = _open_regular(path)
             except UnsafeStoreEntry:  # a link or special file you named yourself: read what it points to
-                fd, info = os.open(path, os.O_RDONLY), os.stat(path)
+                # O_NONBLOCK: opening a FIFO that appeared after the is_file() check must not hang
+                fd = os.open(path, os.O_RDONLY | _O_NONBLOCK | _O_CLOEXEC | _O_BINARY)
+                info = os.fstat(fd)
                 if not stat.S_ISREG(info.st_mode):
                     os.close(fd)
                     die(f"Cannot read {path.name}: it is not a regular file.", EXIT_BAD_INPUT)
@@ -1246,6 +1272,26 @@ def requirements_hint() -> str:
     return f'"{candidate}"' if candidate.is_file() else "requirements.txt"
 
 
+def make_api(api_class):
+    """Create the transcript API client with a timeout on every request (the library sets none itself)."""
+    try:
+        import inspect
+
+        import requests
+        if "http_client" not in inspect.signature(api_class).parameters:
+            return api_class()
+
+        class _TimeoutSession(requests.Session):
+            def request(self, method, url, **kwargs):  # noqa: D102
+                if kwargs.get("timeout") is None:
+                    kwargs["timeout"] = FETCH_TIMEOUT_S
+                return super().request(method, url, **kwargs)
+
+        return api_class(http_client=_TimeoutSession())
+    except (ImportError, TypeError, ValueError):  # no requests, or a client that cannot take a session
+        return api_class()
+
+
 def segments_from_raw(raw):
     """Turn youtube-transcript-api's raw entries into segments, skipping (and counting) unusable ones."""
     segments, skipped = [], 0
@@ -1285,7 +1331,7 @@ def cmd_fetch(a):
 
     langs = [code.strip() for code in a.lang.split(",") if code.strip()] or ["en", "any"]
     try:
-        tlist = YouTubeTranscriptApi().list(vid)
+        tlist = make_api(YouTubeTranscriptApi).list(vid)
         chosen = pick_transcript(tlist, langs)
         if chosen is None:
             available = ", ".join(

@@ -37,7 +37,7 @@ On success it prints the video details and saves the transcript, so later questi
 | 5 | YouTube refused the request (cloud or VPN address, rate limit) | Say in one short line that YouTube refused the request, then use one of the other ways below. Running from the user's own computer usually avoids this |
 | 4 | The video has no readable captions (disabled, private, age-restricted, or none in that language) | Tell the user. If the error lists other languages, rerun with `--lang <code>`. Otherwise stop: do not answer from other sources |
 | 2 | No video ID found, or other bad input | Ask for a proper YouTube link; for other messages, fix the input as the message says |
-| 7 | Transcript storage unavailable, not writable or full | Tell the user in one short line, then rerun with `--out <file>` pointing to a writable place (and use that path for later `show`/`search`/`link` calls) |
+| 7 | Transcript storage unavailable, not writable or full | Tell the user in one short line, then rerun with `--out <file>` pointing to a **new** file in a writable place (and use that path for later `show`/`search`/`link` calls). `--out` refuses to replace an existing file that is not a tubeGPT transcript; never add `--force` unless the user asks for it |
 
 The default language order is English first, then whatever exists. Pass `--lang hi,en` (or any codes) to change it. The output says which language was used and whether the captions are auto-generated.
 

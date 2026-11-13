@@ -2,10 +2,10 @@
 """
 transcript.py - helper for the youtube-conversation skill.
 
-  fetch  VIDEO [--lang en,any] [--out FILE]
+  fetch  VIDEO [--lang en,any] [--out FILE [--force]]
          Download the real transcript of a YouTube video (URL or 11-char ID)
          with the youtube-transcript-api package and save it as JSON.
-  parse  FILE|- [--video URL] [--title T] [--out FILE]
+  parse  FILE|- [--video URL] [--title T] [--out FILE [--force]]
          Normalise a pasted YouTube transcript or an .srt/.vtt/.txt file and
          save it as JSON (same format as fetch).
   show   SRC [--stats] [--from T] [--to T] [--max-chars N]
@@ -765,7 +765,39 @@ def pasted_name(doc) -> str:
     return "pasted-" + digest.hexdigest()[:32]
 
 
-def save_doc(doc, out):
+def _out_may_replace(path):
+    """True if --out may write here: nothing there, an empty file, or an earlier tubeGPT transcript.
+
+    Anything else (a notes file, a shell profile, a symbolic link, a special file) is refused, because the path can
+    come from a model that was steered by text inside a transcript, and a transcript must not be able to make the
+    tool overwrite an unrelated file. ``--force`` is the explicit way to replace one.
+    """
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    if not stat.S_ISREG(info.st_mode):
+        return False
+    if info.st_size == 0:
+        return True
+    if info.st_size > MAX_DOC_BYTES:
+        return False
+    try:
+        fd, info = _open_regular(path)
+    except (UnsafeStoreEntry, OSError):
+        return False
+    try:
+        with os.fdopen(fd, "rb") as handle:
+            data = handle.read(MAX_DOC_BYTES + 1)
+        validate_doc(json.loads(data.decode("utf-8-sig"), parse_constant=_reject_constant))
+    except (ValueError, RecursionError, OverflowError):  # not UTF-8, not JSON, or not a transcript
+        return False
+    return True
+
+
+def save_doc(doc, out, force=False):
     """Validate, then save. A document that this program could not load again is never written."""
     try:
         validate_doc(doc)
@@ -775,6 +807,9 @@ def save_doc(doc, out):
         path = Path(out)
         if path.is_dir():
             die("--out must be a file path, but it points to a folder.", EXIT_BAD_INPUT)
+        if not force and not _out_may_replace(path):
+            die("--out names an existing file that is not a tubeGPT transcript, so it was not replaced. "
+                "Choose a new file name, or add --force if you really want to replace that file.", EXIT_BAD_INPUT)
         write_json_atomic(path, doc)
         return path
     name = doc.get("video_id") or pasted_name(doc)
@@ -1357,7 +1392,7 @@ def cmd_fetch(a):
     title, channel = try_oembed(vid)
     doc = make_doc(segments, source="youtube-transcript-api", video_id=vid, language=language,
                    is_generated=generated, title=title, channel=channel)
-    print(describe(doc, save_doc(doc, a.out)))
+    print(describe(doc, save_doc(doc, a.out, a.force)))
     return 0
 
 
@@ -1434,7 +1469,7 @@ def cmd_parse(a):
         die(f"That input has more than {MAX_SEGMENTS} segments, which is more than this tool will save.",
             EXIT_BAD_INPUT)
     doc = make_doc(segments, source=source, video_id=vid, title=a.title)
-    print(describe(doc, save_doc(doc, a.out)))
+    print(describe(doc, save_doc(doc, a.out, a.force)))
     return 0
 
 
@@ -1676,6 +1711,8 @@ def build_parser():
                    help="preferred language codes in priority order; 'any' = fall back to whatever exists "
                         "(default: en,any)")
     f.add_argument("--out", type=nonempty_path, help="where to save the JSON (default: temp folder, named by video ID)")
+    f.add_argument("--force", action="store_true",
+                   help="let --out replace an existing file that is not a tubeGPT transcript (refused by default)")
     f.set_defaults(func=cmd_fetch)
 
     pa = sub.add_parser("parse", help="import a pasted transcript or .srt/.vtt/.txt file")
@@ -1683,6 +1720,8 @@ def build_parser():
     pa.add_argument("--video", type=short_text(2048), help="YouTube URL or ID, so timestamps can become links")
     pa.add_argument("--title", type=short_text(300), help="optional title label")
     pa.add_argument("--out", type=nonempty_path, help="where to save the JSON")
+    pa.add_argument("--force", action="store_true",
+                    help="let --out replace an existing file that is not a tubeGPT transcript (refused by default)")
     pa.set_defaults(func=cmd_parse)
 
     s = sub.add_parser("show", help="print the transcript with timestamps")

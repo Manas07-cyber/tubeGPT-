@@ -182,16 +182,113 @@ def test_a_fifo_named_explicitly_never_hangs_the_reader(tr, tmp_path):
     assert result["code"] != 0
 
 
-# --------------------------------------------------------------------------- --out pointing at a link
+# --------------------------------------------------------------------------- --out must not overwrite unrelated files
+@pytest.fixture
+def pasted(tmp_path):
+    path = tmp_path / "pasted.txt"
+    path.write_text("[00:01] hello world\n[00:05] second line\n", encoding="utf-8")
+    return path
+
+
+def parse_to(run, pasted, out, *extra):
+    return run("parse", str(pasted), "--video", VID, "--out", str(out), *extra)
+
+
+def test_out_refuses_to_replace_an_unrelated_file_and_leaves_it_untouched(run, tr, pasted, tmp_path):
+    """A transcript that steers an agent into '--out ~/.bashrc' must not be able to overwrite the user's file."""
+    profile = tmp_path / ".bashrc"
+    profile.write_text("export PATH=$HOME/bin:$PATH\n", encoding="utf-8")
+    code, out, err = parse_to(run, pasted, profile)
+    assert code == tr.EXIT_BAD_INPUT and "not a tubeGPT transcript" in err and "--force" in err
+    assert profile.read_text(encoding="utf-8") == "export PATH=$HOME/bin:$PATH\n"
+    assert str(profile) not in err, "the message must not echo paths"
+
+
+@pytest.mark.parametrize("content", ["not json at all", "[]", '{"segments": "nope"}', "\ufffd\ufffd", '{"video_id": 5}'])
+def test_out_refuses_files_that_are_json_or_text_but_not_transcripts(run, tr, pasted, tmp_path, content):
+    target = tmp_path / "other.json"
+    target.write_text(content, encoding="utf-8")
+    code, _, _ = parse_to(run, pasted, target)
+    assert code == tr.EXIT_BAD_INPUT and target.read_text(encoding="utf-8") == content
+
+
+def test_out_may_create_a_new_file_fill_an_empty_one_and_replace_an_earlier_transcript(run, tr, pasted, tmp_path):
+    new = tmp_path / "new.json"
+    assert parse_to(run, pasted, new)[0] == 0 and json.loads(new.read_text(encoding="utf-8"))["video_id"] == VID
+    empty = tmp_path / "empty.json"
+    empty.write_text("", encoding="utf-8")
+    assert parse_to(run, pasted, empty)[0] == 0 and json.loads(empty.read_text(encoding="utf-8"))["video_id"] == VID
+    assert parse_to(run, pasted, new)[0] == 0, "running the same command again must keep working"
+    bom = tmp_path / "bom.json"
+    bom.write_bytes(b"\xef\xbb\xbf" + json.dumps(DOC).encode("utf-8"))
+    assert parse_to(run, pasted, bom)[0] == 0
+
+
+def test_force_is_the_explicit_way_to_replace_an_unrelated_file(run, tr, pasted, tmp_path):
+    target = tmp_path / "notes.txt"
+    target.write_text("my notes", encoding="utf-8")
+    assert parse_to(run, pasted, target)[0] == tr.EXIT_BAD_INPUT
+    assert parse_to(run, pasted, target, "--force")[0] == 0
+    assert json.loads(target.read_text(encoding="utf-8"))["video_id"] == VID
+
+
+def test_out_refuses_a_file_larger_than_a_transcript_can_be(run, tr, pasted, tmp_path, monkeypatch):
+    target = tmp_path / "big.bin"
+    target.write_bytes(b"x" * 500)
+    monkeypatch.setattr(tr, "MAX_DOC_BYTES", 100)
+    assert tr._out_may_replace(target) is False
+
+
 @posix_only
-def test_out_pointing_at_a_symlink_replaces_the_link_and_never_writes_through_it(run, tr, tmp_path):
+def test_out_pointing_at_a_symlink_is_refused_and_with_force_replaces_only_the_link(run, tr, pasted, tmp_path):
     victim = tmp_path / "victim.txt"
     victim.write_text("IMPORTANT", encoding="utf-8")
     link = tmp_path / "out.json"
     link.symlink_to(victim)
-    tr.save_doc({**DOC}, str(link))
-    assert victim.read_text(encoding="utf-8") == "IMPORTANT", "the file the link pointed to must be untouched"
+    assert parse_to(run, pasted, link)[0] == tr.EXIT_BAD_INPUT
+    assert link.is_symlink() and victim.read_text(encoding="utf-8") == "IMPORTANT"
+    assert parse_to(run, pasted, link, "--force")[0] == 0
+    assert victim.read_text(encoding="utf-8") == "IMPORTANT", "never written through the link, even with --force"
     assert not link.is_symlink() and json.loads(link.read_text(encoding="utf-8"))["video_id"] == VID
+
+
+@posix_only
+def test_out_pointing_at_a_pipe_is_refused_without_blocking(tr, tmp_path):
+    fifo = tmp_path / "pipe.json"
+    os.mkfifo(fifo)
+    assert tr._out_may_replace(fifo) is False
+
+
+def test_out_refuses_when_the_target_cannot_be_inspected_or_opened_safely(tr, tmp_path, monkeypatch):
+    """If the check itself fails, the answer is no: an unreadable verdict must never become permission to overwrite."""
+    target = tmp_path / "doc.json"
+    target.write_text(json.dumps(DOC), encoding="utf-8")
+    assert tr._out_may_replace(target) is True
+    monkeypatch.setattr(tr, "_open_regular", lambda *a, **k: (_ for _ in ()).throw(tr.UnsafeStoreEntry("hard link")))
+    assert tr._out_may_replace(target) is False
+    monkeypatch.undo()
+    real_lstat = os.lstat
+
+    def broken(path, *a, **k):
+        if os.fspath(path) == str(target):
+            raise PermissionError(13, "denied")
+        return real_lstat(path, *a, **k)
+
+    monkeypatch.setattr(os, "lstat", broken)
+    assert tr._out_may_replace(target) is False
+
+
+def test_out_still_refuses_a_folder(run, tr, pasted, tmp_path):
+    folder = tmp_path / "dir"
+    folder.mkdir()
+    code, _, err = parse_to(run, pasted, folder, "--force")
+    assert code == tr.EXIT_BAD_INPUT and "folder" in err
+
+
+def test_the_help_text_documents_force(run):
+    for command in ("fetch", "parse"):
+        _, out, err = run(command, "--help")
+        assert "--force" in out + err
 
 
 # --------------------------------------------------------------------------- network timeout

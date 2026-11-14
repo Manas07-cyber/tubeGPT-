@@ -152,14 +152,16 @@ def test_a_file_removed_between_the_recheck_and_the_delete_is_not_an_error(tr, i
     isolated_tmp.mkdir()
     path, entry = scanned(tr, isolated_tmp, f"{VID}.json")
     monkeypatch.setattr(os, "unlink", lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError(errno.ENOENT, "x")))
-    assert tr._remove_if_unchanged(isolated_tmp, None, entry, time.time(), 1) is False
+    monkeypatch.setattr(tr, "_win_mark_delete", lambda fd: (_ for _ in ()).throw(FileNotFoundError(errno.ENOENT, "x")))
+    assert tr._remove_if_unchanged(isolated_tmp, None, entry, time.time(), 1) is False   # (Windows deletes through a handle)
 
 
 def test_a_refused_delete_is_reported_and_the_file_stays(tr, isolated_tmp, monkeypatch, logs):
     isolated_tmp.mkdir()
     path, entry = scanned(tr, isolated_tmp, f"{VID}.json")
     monkeypatch.setattr(os, "unlink", lambda *a, **k: (_ for _ in ()).throw(PermissionError(errno.EACCES, "no")))
-    assert tr._remove_if_unchanged(isolated_tmp, None, entry, time.time(), 1) is False
+    monkeypatch.setattr(tr, "_win_mark_delete", lambda fd: (_ for _ in ()).throw(PermissionError(errno.EACCES, "no")))
+    assert tr._remove_if_unchanged(isolated_tmp, None, entry, time.time(), 1) is False   # (Windows deletes through a handle)
     assert path.exists() and any("Could not remove" in m for m in logs)
 
 

@@ -304,6 +304,14 @@ def test_a_failed_removal_is_reported_and_does_not_stop_the_rest(tr, isolated_tm
             raise PermissionError(errno.EACCES, "denied")
         return real_unlink(path, *args, **kwargs)
     monkeypatch.setattr(os, "unlink", flaky)
+    real_open = tr._win_open_for_delete if os.name == "nt" else None
+
+    def flaky_open(path):                      # Windows deletes through an open handle, not os.unlink
+        if str(path).endswith("00000000001.json"):
+            raise PermissionError(errno.EACCES, "denied")
+        return real_open(path)
+    if os.name == "nt":
+        monkeypatch.setattr(tr, "_win_open_for_delete", flaky_open)
     result = tr.cleanup_store(isolated_tmp)
     assert result["expired"] == 2                          # the two removable files went, the stuck one stays
     assert sorted(p.name for p in isolated_tmp.iterdir() if p.name != tr.LOCK_NAME) == ["00000000001.json"]

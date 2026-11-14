@@ -482,8 +482,10 @@ def _win_open_for_delete(path):  # pragma: no cover - Windows only
 def _win_pin_dir(path):  # pragma: no cover - Windows only
     """Open the store folder without FILE_SHARE_DELETE: while this handle is open Windows refuses to rename,
     replace or delete that folder, which is what the POSIX directory descriptor provides."""
-    # READ_CONTROL | FILE_READ_ATTRIBUTES; share read and write only; BACKUP_SEMANTICS | OPEN_REPARSE_POINT
-    return _win_open(path, 0x00020000 | 0x0080, 3, 0x02000000 | 0x00200000)
+    # FILE_LIST_DIRECTORY | READ_CONTROL | FILE_READ_ATTRIBUTES; share read and write only;
+    # BACKUP_SEMANTICS | OPEN_REPARSE_POINT. FILE_LIST_DIRECTORY matters: Windows ignores the share mode of a handle
+    # that was opened with attribute and security access only, so without it this handle would pin nothing.
+    return _win_open(path, 0x00000001 | 0x00020000 | 0x0080, 3, 0x02000000 | 0x00200000)
 
 
 def _win_mark_delete(fd):  # pragma: no cover - Windows only

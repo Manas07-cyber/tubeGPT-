@@ -38,6 +38,20 @@ def scan_one(tr, folder, name):
 
 
 @pytest.fixture
+def closed(monkeypatch):
+    """Descriptors closed during the test. Checking with os.fstat is unreliable: numbers are reused immediately."""
+    done = []
+    real = os.close
+
+    def record(fd):
+        done.append(fd)
+        real(fd)
+
+    monkeypatch.setattr(os, "close", record)
+    return done
+
+
+@pytest.fixture
 def as_windows(tr, monkeypatch):
     """Make the portable decision code behave as on Windows, with fake Win32 functions that act on the real file."""
     monkeypatch.setattr(tr, "_IS_POSIX", False)
@@ -51,7 +65,8 @@ def as_windows(tr, monkeypatch):
     monkeypatch.setattr(tr, "_win_owner_sid", fake_owner)
     monkeypatch.setattr(tr, "_win_my_sids", lambda: frozenset({"S-1-5-21-1"}))
     monkeypatch.setattr(tr, "_win_open_for_delete", lambda path: os.open(path, os.O_RDONLY | getattr(os, "O_BINARY", 0)))
-    monkeypatch.setattr(tr, "_win_pin_dir", lambda path: os.open(path, os.O_RDONLY))
+    if os.name == "posix":    # on real Windows the real pin is used, because os.open cannot open a folder there
+        monkeypatch.setattr(tr, "_win_pin_dir", lambda path: os.open(path, os.O_RDONLY))
 
     def mark(fd):
         state.marked.append(fd)
@@ -200,7 +215,7 @@ def test_a_file_whose_owner_changed_is_not_deleted(tr, tmp_path, as_windows):
     assert as_windows.marked == []
 
 
-def test_the_handle_is_closed_whatever_the_outcome(tr, tmp_path, as_windows, monkeypatch):
+def test_the_handle_is_closed_whatever_the_outcome(tr, tmp_path, as_windows, monkeypatch, closed):
     path = make(tmp_path / f"{VID}.json", age_h=48)
     entry = scan_one(tr, tmp_path, path.name)
     opened = []
@@ -208,8 +223,7 @@ def test_the_handle_is_closed_whatever_the_outcome(tr, tmp_path, as_windows, mon
     monkeypatch.setattr(tr, "_win_open_for_delete", lambda p: opened.append(real(p)) or opened[-1])
     as_windows.mine = False
     tr._delete_exact(tmp_path, entry, time.time(), HOUR)
-    with pytest.raises(OSError):
-        os.fstat(opened[0])
+    assert opened[0] in closed
 
 
 def test_a_failed_deletion_request_is_reported_and_the_file_stays(tr, tmp_path, as_windows, monkeypatch):
@@ -276,18 +290,17 @@ def test_the_pin_is_refused_for_something_that_is_not_a_folder(tr, tmp_path, as_
         tr._pin_store(tmp_path)
 
 
-def test_the_pin_is_closed_when_it_is_refused(tr, tmp_path, as_windows, monkeypatch):
+def test_the_pin_is_closed_when_it_is_refused(tr, tmp_path, as_windows, monkeypatch, closed):
     opened = []
     real = tr._win_pin_dir
     monkeypatch.setattr(tr, "_win_pin_dir", lambda p: opened.append(real(p)) or opened[-1])
     as_windows.mine = False
     with pytest.raises(tr.UnsafeStoreEntry):
         tr._pin_store(tmp_path)
-    with pytest.raises(OSError):
-        os.fstat(opened[0])
+    assert opened[0] in closed
 
 
-def test_cleanup_on_windows_deletes_only_what_is_due_and_closes_its_pin(tr, isolated_tmp, as_windows, monkeypatch):
+def test_cleanup_on_windows_deletes_only_what_is_due_and_closes_its_pin(tr, isolated_tmp, as_windows, monkeypatch, closed):
     isolated_tmp.mkdir()
     old = make(isolated_tmp / f"{VID}.json", age_h=24 * 30)
     fresh = make(isolated_tmp / f"{OTHER}.json", age_h=0)
@@ -299,8 +312,7 @@ def test_cleanup_on_windows_deletes_only_what_is_due_and_closes_its_pin(tr, isol
     result = tr.cleanup_store(isolated_tmp)
     assert result["expired"] == 1 and deleted == [os.stat(old).st_ino]
     assert fresh.exists()
-    with pytest.raises(OSError):
-        os.fstat(pins[0])
+    assert pins[0] in closed
 
 
 def test_cleanup_on_windows_deletes_nothing_if_the_folder_cannot_be_pinned(tr, isolated_tmp, as_windows, monkeypatch):

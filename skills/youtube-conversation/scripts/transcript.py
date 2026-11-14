@@ -340,9 +340,180 @@ def storage_error(exc: OSError, action: str):
         "or choose another location with --out.", EXIT_STORAGE)
 
 
+# --------------------------------------------------------------------------
+# Windows security helpers: standard library only (ctypes). They run only on Windows. Coverage is measured on
+# Linux, so the thin Win32 wrappers are marked "no cover"; the Windows CI job runs real tests against them
+# (tests/test_windows_security.py). Every failure to use them ends in "not trusted" or "not deleted".
+# --------------------------------------------------------------------------
+_WIN_REPARSE = 0x400          # FILE_ATTRIBUTE_REPARSE_POINT: a symbolic link, a junction or a mount point
+_win_state = {}
+
+
+def _win_api():  # pragma: no cover - Windows only
+    """Declare the Win32 functions used below once. Raises OSError where they are not available."""
+    if "api" in _win_state:
+        return _win_state["api"]
+    try:
+        import ctypes
+        import msvcrt
+        import types
+        from ctypes import wintypes
+        adv = ctypes.WinDLL("advapi32", use_last_error=True)
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        ptr, dword, out = ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p)
+        k32.GetCurrentProcess.restype = ptr
+        k32.CloseHandle.argtypes = [ptr]
+        k32.LocalFree.argtypes = [ptr]
+        k32.LocalFree.restype = ptr
+        k32.CreateFileW.argtypes = [wintypes.LPCWSTR, dword, dword, ptr, dword, dword, ptr]
+        k32.CreateFileW.restype = ptr
+        k32.SetFileInformationByHandle.argtypes = [ptr, ctypes.c_int, ptr, dword]
+        k32.SetFileInformationByHandle.restype = wintypes.BOOL
+        adv.OpenProcessToken.argtypes = [ptr, dword, out]
+        adv.OpenProcessToken.restype = wintypes.BOOL
+        adv.GetTokenInformation.argtypes = [ptr, ctypes.c_int, ptr, dword, ctypes.POINTER(dword)]
+        adv.GetTokenInformation.restype = wintypes.BOOL
+        adv.ConvertSidToStringSidW.argtypes = [ptr, ctypes.POINTER(wintypes.LPWSTR)]
+        adv.ConvertSidToStringSidW.restype = wintypes.BOOL
+        adv.GetSecurityInfo.argtypes = [ptr, ctypes.c_int, dword, out, ptr, ptr, ptr, out]
+        adv.GetSecurityInfo.restype = dword
+        adv.GetNamedSecurityInfoW.argtypes = [wintypes.LPCWSTR, ctypes.c_int, dword, out, ptr, ptr, ptr, out]
+        adv.GetNamedSecurityInfoW.restype = dword
+    except (ImportError, AttributeError, OSError) as exc:
+        raise OSError("the Windows security functions are not available") from exc
+    _win_state["api"] = types.SimpleNamespace(ctypes=ctypes, msvcrt=msvcrt, wintypes=wintypes, adv=adv, k32=k32)
+    return _win_state["api"]
+
+
+def _win_sid_text(api, psid):  # pragma: no cover - Windows only
+    text = api.wintypes.LPWSTR()
+    if not api.adv.ConvertSidToStringSidW(psid, api.ctypes.byref(text)):
+        raise api.ctypes.WinError(api.ctypes.get_last_error())
+    try:
+        return text.value
+    finally:
+        api.k32.LocalFree(api.ctypes.cast(text, api.ctypes.c_void_p))
+
+
+def _win_my_sids():  # pragma: no cover - Windows only
+    """SIDs that count as "me": the process token's user, and its default owner (the Administrators group when
+    the process is elevated, because Windows then records new files as owned by that group)."""
+    if "sids" in _win_state:
+        return _win_state["sids"]
+    api = _win_api()
+    c = api.ctypes
+    token = c.c_void_p()
+    if not api.adv.OpenProcessToken(api.k32.GetCurrentProcess(), 0x0008, c.byref(token)):  # TOKEN_QUERY
+        raise c.WinError(c.get_last_error())
+    try:
+        sids = set()
+        for info_class in (1, 4):  # TokenUser, TokenOwner
+            needed = api.wintypes.DWORD()
+            api.adv.GetTokenInformation(token, info_class, None, 0, c.byref(needed))  # asks for the size
+            buffer = c.create_string_buffer(needed.value)
+            if not api.adv.GetTokenInformation(token, info_class, buffer, needed.value, c.byref(needed)):
+                raise c.WinError(c.get_last_error())
+            sids.add(_win_sid_text(api, c.c_void_p.from_buffer(buffer).value))
+    finally:
+        api.k32.CloseHandle(token)
+    _win_state["sids"] = frozenset(sids)
+    return _win_state["sids"]
+
+
+def _win_owner_sid(target):  # pragma: no cover - Windows only
+    """The owner SID (as text) of an open file descriptor (an int) or of a path."""
+    api = _win_api()
+    c = api.ctypes
+    owner, descriptor = c.c_void_p(), c.c_void_p()
+    if isinstance(target, int):
+        status = api.adv.GetSecurityInfo(api.msvcrt.get_osfhandle(target), 1, 1, c.byref(owner),  # SE_FILE_OBJECT,
+                                         None, None, None, c.byref(descriptor))                   # OWNER_SECURITY_INFO
+    else:
+        status = api.adv.GetNamedSecurityInfoW(str(target), 1, 1, c.byref(owner), None, None, None,
+                                               c.byref(descriptor))
+    if status:
+        raise OSError(status, "the owner of the file could not be read")
+    try:
+        return _win_sid_text(api, owner.value)
+    finally:
+        api.k32.LocalFree(descriptor)
+
+
+def _windows_owned_by_me(target) -> bool:
+    """True only when the owner of ``target`` (an open descriptor or a path) is verified to be the current user.
+
+    Anything that prevents the check (no ctypes, an access error, an unexpected value) means "not trusted".
+    """
+    if target is None:
+        return False
+    try:
+        return _win_owner_sid(target) in _win_my_sids()
+    except (OSError, ValueError, AttributeError, ImportError, TypeError):
+        log.debug("event=owner_check_failed")
+        return False
+
+
+def _win_fd(handle):  # pragma: no cover - Windows only
+    api = _win_api()
+    try:
+        return api.msvcrt.open_osfhandle(handle, os.O_RDONLY)
+    except OSError:
+        api.k32.CloseHandle(handle)
+        raise
+
+
+def _win_open(path, access, share, flags):  # pragma: no cover - Windows only
+    """CreateFileW on an existing file or folder; returns a C descriptor that owns the handle."""
+    api = _win_api()
+    c = api.ctypes
+    handle = api.k32.CreateFileW(str(path), access, share, None, 3, flags, None)  # OPEN_EXISTING
+    if handle is None or handle == c.c_void_p(-1).value:
+        raise c.WinError(c.get_last_error())
+    return _win_fd(handle)
+
+
+def _win_open_for_delete(path):  # pragma: no cover - Windows only
+    """Open the file itself (a link is opened, never followed) with the right to delete it, sharing it with
+    everyone, so what is inspected and what is deleted is one and the same open file object."""
+    # DELETE | READ_CONTROL | FILE_READ_ATTRIBUTES; share read, write and delete; FILE_FLAG_OPEN_REPARSE_POINT
+    return _win_open(path, 0x00010000 | 0x00020000 | 0x0080, 7, 0x00200000)
+
+
+def _win_pin_dir(path):  # pragma: no cover - Windows only
+    """Open the store folder without FILE_SHARE_DELETE: while this handle is open Windows refuses to rename,
+    replace or delete that folder, which is what the POSIX directory descriptor provides."""
+    # READ_CONTROL | FILE_READ_ATTRIBUTES; share read and write only; BACKUP_SEMANTICS | OPEN_REPARSE_POINT
+    return _win_open(path, 0x00020000 | 0x0080, 3, 0x02000000 | 0x00200000)
+
+
+def _win_mark_delete(fd):  # pragma: no cover - Windows only
+    """Ask Windows to delete the file behind this open handle when it is closed (FileDispositionInfo)."""
+    api = _win_api()
+    c = api.ctypes
+    flag = c.c_ubyte(1)  # FILE_DISPOSITION_INFO { BOOLEAN DeleteFile }
+    if not api.k32.SetFileInformationByHandle(api.msvcrt.get_osfhandle(fd), 4, c.byref(flag), 1):
+        raise c.WinError(c.get_last_error())
+
+
 def _owned_by_me(info) -> bool:
-    """True when the file belongs to the current user (always true where the OS has no user IDs)."""
-    return not hasattr(os, "getuid") or info.st_uid == os.getuid()
+    """POSIX: True when the file's user ID is the current user's.
+
+    A stat result carries no owner on Windows, so without user IDs the answer is False: ownership is never
+    assumed. Callers use ``_is_mine``, which reads the real owner on Windows.
+    """
+    return hasattr(os, "getuid") and info.st_uid == os.getuid()
+
+
+def _is_mine(info, target) -> bool:
+    """True when the file or folder belongs to the current user.
+
+    ``target`` is an open descriptor (preferred, because it is the object that was inspected) or a path; Windows
+    needs it to read the owner from the security descriptor. If the owner cannot be established the answer is
+    False: unknown ownership is never trusted.
+    """
+    if hasattr(os, "getuid"):
+        return _owned_by_me(info)
+    return _windows_owned_by_me(target)
 
 
 def _open_regular(path, flags=os.O_RDONLY, mode=0o600):
@@ -362,7 +533,7 @@ def _open_regular(path, flags=os.O_RDONLY, mode=0o600):
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode):
             raise UnsafeStoreEntry("not a regular file")
-        if not _owned_by_me(info):
+        if not _is_mine(info, fd):
             raise UnsafeStoreEntry("owned by another user")
         if info.st_nlink > 1:  # a generated transcript never has a second name; this is a planted hard link
             raise UnsafeStoreEntry("hard link")
@@ -405,7 +576,7 @@ def _tighten_dir(store):
     fd = os.open(store, os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW | _O_CLOEXEC)
     try:
         info = os.fstat(fd)
-        if not _owned_by_me(info):
+        if not _is_mine(info, fd):
             die("The transcript storage folder belongs to another user, so it was not used. "
                 "Set TUBEGPT_STORAGE_DIR to a folder of your own.", EXIT_STORAGE)
         if stat.S_IMODE(info.st_mode) & 0o077:
@@ -482,9 +653,9 @@ def ensure_store(create: bool = True) -> Path:
                 "Point TUBEGPT_STORAGE_DIR at the real folder.", EXIT_STORAGE)  # junctions are not S_ISLNK
         if not stat.S_ISDIR(info.st_mode):
             die("The transcript storage location exists but is not a folder.", EXIT_STORAGE)
-        if not _owned_by_me(info):
-            die("The transcript storage folder belongs to another user, so it was not used. "
-                "Set TUBEGPT_STORAGE_DIR to a folder of your own.", EXIT_STORAGE)
+        if not _is_mine(info, store):
+            die("The transcript storage folder belongs to another user, or its owner could not be verified, "
+                "so it was not used. Set TUBEGPT_STORAGE_DIR to a folder of your own.", EXIT_STORAGE)
         if custom and create and not marker_is_valid(store) and (created or not any(store.iterdir())):
             _write_marker(store)
         if not custom or marker_is_valid(store):
@@ -612,12 +783,15 @@ class _Entry(collections.namedtuple("_Entry", "name mtime size ident is_tmp")):
     """A scanned store file. ``ident`` (device, inode, mtime_ns, size) detects replacement or refresh."""
 
 
+# Whether this system can scan, stat and unlink relative to an open directory. Decided once, when the module loads.
+_HAS_DIR_FD = os.scandir in os.supports_fd and os.stat in os.supports_dir_fd and os.unlink in os.supports_dir_fd
+
+
 def _dir_fd(store):
-    if not (_IS_POSIX and os.scandir in os.supports_fd and os.stat in os.supports_dir_fd
-            and os.unlink in os.supports_dir_fd):
+    if not (_IS_POSIX and _HAS_DIR_FD):
         return None
     fd = os.open(store, os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW | _O_CLOEXEC)
-    if not _owned_by_me(os.fstat(fd)):
+    if not _is_mine(os.fstat(fd), fd):
         os.close(fd)
         raise UnsafeStoreEntry("owned by another user")
     return fd
@@ -640,11 +814,57 @@ def _scan_store(store, dirfd):
                 info = _stat_entry(store, dirfd, entry.name)
             except OSError:
                 continue
-            if not stat.S_ISREG(info.st_mode) or not _owned_by_me(info) or info.st_nlink > 1:
+            if not stat.S_ISREG(info.st_mode) or not _is_mine(info, Path(store) / entry.name) \
+                    or info.st_nlink > 1:
                 continue  # links, hard links, folders and other users' files are never candidates
             entries.append(_Entry(entry.name, info.st_mtime, info.st_size,
                                   (info.st_dev, info.st_ino, info.st_mtime_ns, info.st_size), is_tmp))
     return entries
+
+
+def _pin_store(store):
+    """Windows: hold the store folder open, without delete-sharing, for the whole cleanup.
+
+    While the handle is open Windows refuses to rename, replace or remove that folder, which is what the POSIX
+    directory descriptor gives. Returns a descriptor to close afterwards, or None on POSIX. Raises (so that nothing
+    is deleted) if the folder is a link or junction, is not a folder, or its owner cannot be verified.
+    """
+    if _IS_POSIX:
+        return None
+    fd = _win_pin_dir(store)
+    try:
+        info = os.fstat(fd)
+        if getattr(info, "st_file_attributes", 0) & _WIN_REPARSE or not stat.S_ISDIR(info.st_mode):
+            raise UnsafeStoreEntry("not a plain folder")
+        if not _is_mine(info, fd):
+            raise UnsafeStoreEntry("owned by another user")
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _delete_exact(store, entry, now, min_age) -> bool:
+    """Windows: delete the file that was scanned, or nothing at all.
+
+    The file is opened once (a link is opened, never followed) with the right to delete it. Everything is verified
+    on that open handle: regular file, no second name, owned by the current user, still the scanned file, still old
+    enough. Deletion is then requested on the same handle, so a file that replaced the path after the check is
+    never touched. Returns False when the file is not the one that was scanned.
+    """
+    fd = _win_open_for_delete(Path(store) / entry.name)
+    try:
+        info = os.fstat(fd)
+        ident = (info.st_dev, info.st_ino, info.st_mtime_ns, info.st_size)
+        if (getattr(info, "st_file_attributes", 0) & _WIN_REPARSE or not stat.S_ISREG(info.st_mode)
+                or info.st_nlink > 1 or ident != entry.ident or now - info.st_mtime < min_age
+                or not _is_mine(info, fd)):
+            log.debug("event=cleanup_skipped_changed")
+            return False
+        _win_mark_delete(fd)
+        return True
+    finally:
+        os.close(fd)  # the file is removed when this last handle closes
 
 
 def _remove_if_unchanged(store, dirfd, entry, now, min_age):
@@ -660,7 +880,8 @@ def _remove_if_unchanged(store, dirfd, entry, now, min_age):
         log.warning("Could not re-check an old transcript file (%s).", type(exc).__name__)
         return False
     ident = (info.st_dev, info.st_ino, info.st_mtime_ns, info.st_size)
-    if not stat.S_ISREG(info.st_mode) or not _owned_by_me(info) or info.st_nlink > 1 or ident != entry.ident:
+    if not stat.S_ISREG(info.st_mode) or not _is_mine(info, Path(store) / entry.name) or info.st_nlink > 1 \
+            or ident != entry.ident:
         log.debug("event=cleanup_skipped_changed")
         return False
     if now - info.st_mtime < min_age:
@@ -668,6 +889,9 @@ def _remove_if_unchanged(store, dirfd, entry, now, min_age):
     try:
         if dirfd is not None:
             os.unlink(entry.name, dir_fd=dirfd)
+        elif not _IS_POSIX:
+            if not _delete_exact(store, entry, now, min_age):
+                return False
         else:
             os.unlink(Path(store) / entry.name)
     except FileNotFoundError:
@@ -711,9 +935,13 @@ def cleanup_store(store, *, keep=(), dry_run: bool = False, now=None):
     retention_s, max_bytes, max_files = storage_limits()
     now = time.time() if now is None else now
     keep_names = {Path(k).name for k in keep}
-    dirfd = None
+    dirfd = pin = None
     try:
         dirfd = _dir_fd(store)
+        if dirfd is None and _IS_POSIX:  # no directory descriptors: a path-based delete could hit a swapped-in file
+            log.warning("Cleanup was skipped: this system cannot delete files in the store safely.")
+            return result
+        pin = _pin_store(store)
         entries = _scan_store(store, dirfd)
         entries.sort(key=lambda e: (e.mtime, e.name))
 
@@ -747,8 +975,9 @@ def cleanup_store(store, *, keep=(), dry_run: bool = False, now=None):
         log.warning("Could not clean the transcript store (%s).", type(exc).__name__)
         return result
     finally:
-        if dirfd is not None:
-            os.close(dirfd)
+        for handle in (dirfd, pin):
+            if handle is not None:
+                os.close(handle)
     log.debug("event=cleanup expired=%d over_limit=%d freed_bytes=%d remaining=%d dry_run=%s",
               result["expired"], result["over_limit"], result["freed_bytes"], result["remaining"], dry_run)
     return result

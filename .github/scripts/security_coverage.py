@@ -64,6 +64,10 @@ CRITICAL = {
     "cleanup_allowed": "destructive", "cmd_cleanup": "destructive", "save_doc": "destructive",
     "load_doc": "destructive", "_read_validated": "destructive", "_touch": "destructive",
     "storage_error": "destructive", "pasted_name": "destructive",
+    # Windows ownership and handle-based deletion: the decisions are tested on every platform with fake Win32
+    # calls; the real calls are in WINDOWS_ONLY below.
+    "_owned_by_me": "destructive", "_is_mine": "destructive", "_windows_owned_by_me": "destructive",
+    "_pin_store": "destructive", "_delete_exact": "destructive",
     # validation and input limits
     "validate_doc": "boundary", "_number": "boundary", "parse_time_arg": "boundary", "decode_input": "boundary",
     "read_stdin_bytes": "boundary", "read_input_text": "boundary", "split_text": "boundary",
@@ -81,15 +85,80 @@ EXCEPTIONS = {
     # qualname: (Req(line, branch), "why the tier cannot be met")
 }
 
+# Thin wrappers over the Win32 API (through ctypes). They cannot run on the Linux job that measures coverage, so
+# they carry ``# pragma: no cover`` and are exempt from the percentages. They are NOT exempt from scrutiny:
+#   * every function whose name starts with ``_win_`` must be listed here (so new Win32 code cannot be added quietly);
+#   * a listed function must be defined once, and ALL of its statements must be excluded by the pragma (a
+#     function that has measurable statements belongs in CRITICAL, with a real requirement);
+#   * their behaviour is verified only by the Windows CI jobs (tests/test_windows_security.py, ``on_windows``),
+#     which this script does not read. A passing run of this script says nothing about them.
+WINDOWS_ONLY = {
+    "_win_api": "declares the Win32 functions used below (ctypes import lives here and nowhere else)",
+    "_win_sid_text": "turns a SID into text",
+    "_win_my_sids": "reads the SIDs of the current process token",
+    "_win_owner_sid": "reads the owner SID of an open file or a path",
+    "_win_fd": "wraps a Win32 handle in a C descriptor",
+    "_win_open": "CreateFileW on an existing file or folder",
+    "_win_open_for_delete": "opens a file (a link is not followed) with the right to delete it",
+    "_win_pin_dir": "opens the store folder without delete-sharing so it cannot be renamed during cleanup",
+    "_win_mark_delete": "requests deletion on an open handle (FileDispositionInfo)",
+}
+
 # Whole-file floors (from the report summary; the branch figure is covered_branches / num_branches).
 # Measured at the same commit: 97.9% of lines and 95.3% of branches for the whole file.
 OVERALL = Req(line=95, branch=90)
 
-# Calls that delete, rename over, re-permission or create files. A function that makes one must be in CRITICAL.
-_FS_MODULES = {"os", "shutil"}
-_FS_OS_ATTRS = {"unlink", "remove", "rmdir", "rmtree", "replace", "rename", "chmod", "fchmod", "chown", "fchown",
-                "truncate", "ftruncate", "symlink", "link", "utime", "mkdir", "makedirs", "mkstemp", "mkfifo"}
-_FS_PATH_ATTRS = {"unlink", "rmdir", "write_text", "write_bytes", "touch", "symlink_to", "hardlink_to"}
+# --- What counts as "changes the file system" -----------------------------------------------------------------
+# A function that does any of this must be listed in CRITICAL (or WINDOWS_ONLY below), so new destructive code
+# cannot be added without a coverage requirement. The detector is a conservative static analysis of one source
+# file; its limits are listed in LIMITATIONS and are tested. When it cannot tell, it reports "may change files".
+_OS_MUTATORS = {
+    "unlink", "remove", "rmdir", "removedirs", "rename", "renames", "replace", "chmod", "fchmod", "lchmod", "chown",
+    "fchown", "lchown", "chflags", "lchflags", "truncate", "ftruncate", "symlink", "link", "utime", "mkdir",
+    "makedirs", "mkfifo", "mknod", "write", "writev", "pwrite", "pwritev", "sendfile", "copy_file_range",
+    "system", "popen", "startfile", "execl", "execle", "execlp", "execlpe", "execv", "execve", "execvp", "execvpe",
+    "spawnl", "spawnle", "spawnlp", "spawnlpe", "spawnv", "spawnve", "spawnvp", "spawnvpe", "posix_spawn",
+    "posix_spawnp", "fork", "forkpty"}
+_SHUTIL_MUTATORS = {"rmtree", "move", "copy", "copy2", "copyfile", "copyfileobj", "copymode", "copystat", "copytree",
+                    "chown", "make_archive", "unpack_archive"}
+_TEMPFILE_MUTATORS = {"mkstemp", "mkdtemp", "NamedTemporaryFile", "TemporaryFile", "TemporaryDirectory",
+                      "SpooledTemporaryFile"}
+_PATH_CLASSES = ("pathlib.Path", "pathlib.PurePath", "pathlib.PosixPath", "pathlib.WindowsPath")
+_PATH_MUTATORS = {"unlink", "rmdir", "write_text", "write_bytes", "touch", "symlink_to", "hardlink_to", "link_to",
+                  "mkdir", "rename", "chmod", "lchmod", "extract", "extractall"}
+# Calls whose effect depends on a mode argument (read-only modes are not changes). The number is the mode's
+# positional index; a mode that is not a plain string constant is treated as writing.
+_OPEN_CALLS = {"builtins.open": 1, "io.open": 1, "codecs.open": 1, "os.fdopen": 1, "gzip.open": 1, "bz2.open": 1,
+               "lzma.open": 1}
+_ALWAYS_MUTATING = {"zipfile.ZipFile", "tarfile.open", "tarfile.TarFile", "sqlite3.connect", "subprocess.run",
+                    "subprocess.call", "subprocess.check_call", "subprocess.check_output", "subprocess.Popen",
+                    "subprocess.getoutput", "subprocess.getstatusoutput", "ctypes.windll", "ctypes.WinDLL"}
+_OS_OPEN_READ_FLAGS = {"O_RDONLY", "O_NOFOLLOW", "O_CLOEXEC", "O_BINARY", "O_DIRECTORY", "O_NONBLOCK", "O_NOCTTY",
+                       "O_NOINHERIT", "O_NOATIME", "O_PATH", "O_SEQUENTIAL", "O_RANDOM"}
+# Win32 entry points that create, delete, move or re-permission files. They are called through ctypes handles, so
+# they are recognised by name wherever they are referenced.
+_WIN32_MUTATORS = {
+    "CreateFileW", "CreateFileA", "DeleteFileW", "DeleteFileA", "MoveFileW", "MoveFileExW", "ReplaceFileW", "CopyFileW",
+    "CopyFileExW", "SetFileInformationByHandle", "SetFileAttributesW", "SetFileTime", "SetEndOfFile", "WriteFile",
+    "SetNamedSecurityInfoW", "SetSecurityInfo", "RemoveDirectoryW", "CreateDirectoryW", "CreateSymbolicLinkW",
+    "CreateHardLinkW", "DeviceIoControl"}
+_DYNAMIC = {"__import__", "eval", "exec", "compile", "importlib.import_module", "builtins.__import__",
+            "builtins.eval", "builtins.exec", "builtins.compile"}
+_TRACKED_MODULES = {"os", "shutil", "tempfile", "pathlib", "io", "codecs", "gzip", "bz2", "lzma", "zipfile",
+                    "tarfile", "sqlite3", "subprocess", "ctypes", "builtins", "importlib", "posix", "nt"}
+
+LIMITATIONS = """What this detector can and cannot see (all of it is a static, per-file analysis):
+  seen:     calls and references (aliases, ``from x import y as z``, ``z = os.unlink``, callbacks such as
+            ``map(os.remove, ...)``) to os / shutil / tempfile / pathlib / io / zipfile / tarfile / sqlite3 /
+            subprocess / ctypes-Win32 mutators; open()/os.open() with a writing or unknowable mode or flags;
+            Path-style methods on any object (``x.unlink()``, ``x.replace(target)``); getattr/__import__/eval on
+            those modules; changes made while the module or a class body runs; nested and async functions.
+  not seen: a changing call hidden behind another module's function (a helper imported from elsewhere), objects
+            passed in from outside, writes through an already open file object (``handle.write``), third-party
+            libraries, C extensions, and dynamic dispatch the analysis cannot resolve (it reports the unresolvable
+            forms it recognises, but cannot find every one). A function that only CALLS a flagged function is not
+            flagged itself; the flagged function must be gated.
+  So a pass means "no known pattern was missed", never "no function can change files"."""
 
 _FUNCS = (ast.FunctionDef, ast.AsyncFunctionDef)
 _SCOPES = _FUNCS + (ast.ClassDef,)
@@ -99,7 +168,11 @@ class Fn(NamedTuple):
     qualname: str
     kind: str            # "def", "async def"
     own: frozenset       # line numbers belonging to this function and not to something nested in it
-    mutates_files: bool
+    reasons: tuple       # why the function may change files (empty if it does not)
+
+    @property
+    def mutates_files(self):
+        return bool(self.reasons)
 
 
 def _own_lines(node):
@@ -110,33 +183,195 @@ def _own_lines(node):
     return frozenset(lines)
 
 
-def _calls_that_mutate(node):
-    """True if this function's own statements (not nested functions) make a file-mutating call."""
-    stack = list(ast.iter_child_nodes(node))
+def _own_nodes(body):
+    """Every node of these statements that belongs to this scope (nested functions and classes are separate)."""
+    stack = list(body)
     while stack:
-        child = stack.pop()
-        if isinstance(child, _SCOPES):
+        node = stack.pop()
+        yield node
+        if isinstance(node, _SCOPES):
             continue
-        if isinstance(child, ast.Call) and isinstance(child.func, ast.Attribute):
-            attr, base = child.func.attr, child.func.value
-            if isinstance(base, ast.Name) and base.id in _FS_MODULES and attr in _FS_OS_ATTRS:
-                return True
-            if attr in _FS_PATH_ATTRS:
-                return True
-        stack.extend(ast.iter_child_nodes(child))
+        stack.extend(ast.iter_child_nodes(node))
+
+
+def _resolve(expr, env):
+    """Dotted origin of a name or attribute chain (``o.unlink`` -> ``os.unlink``), or None if unknown."""
+    if isinstance(expr, ast.Name):
+        return env.get(expr.id)
+    if isinstance(expr, ast.Attribute):
+        base = _resolve(expr.value, env)
+        return f"{base}.{expr.attr}" if base else None
+    return None
+
+
+def _bind(body, env):
+    """Add the import aliases and simple assignment aliases of these statements to ``env`` (flow-insensitive)."""
+    nodes = list(_own_nodes(body))
+    for node in nodes:
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                env[alias.asname or alias.name.split(".")[0]] = alias.name if alias.asname else alias.name.split(".")[0]
+        elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+            for alias in node.names:
+                if alias.name != "*":
+                    env[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+    for _ in range(3):  # aliases of aliases
+        for node in nodes:
+            target = value = None
+            if isinstance(node, ast.Assign) and len(node.targets) == 1:
+                target, value = node.targets[0], node.value
+            elif isinstance(node, ast.AnnAssign) and node.value is not None:
+                target, value = node.target, node.value
+            if isinstance(target, ast.Name):
+                origin = _resolve(value, env)
+                if origin and origin.split(".")[0] in _TRACKED_MODULES:
+                    env[target.id] = origin
+    return env
+
+
+def _star_imports(tree):
+    return sorted({n.module for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) and n.module
+                   and any(a.name == "*" for a in n.names) and n.module.split(".")[0] in _TRACKED_MODULES})
+
+
+def _mode_writes(call, index):
+    node = next((k.value for k in call.keywords if k.arg == "mode"), None)
+    if node is None and len(call.args) > index:
+        node = call.args[index]
+    if node is None:
+        return False  # the default mode is "r"
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return any(c in node.value for c in "wax+")
+    return True       # not a constant: cannot be shown to be read-only
+
+
+def _flag_is_read_only(node):
+    if isinstance(node, ast.BinOp):
+        return isinstance(node.op, ast.BitOr) and _flag_is_read_only(node.left) and _flag_is_read_only(node.right)
+    if isinstance(node, ast.Name):
+        return node.id.lstrip("_") in _OS_OPEN_READ_FLAGS
+    if isinstance(node, ast.Attribute):
+        return node.attr in _OS_OPEN_READ_FLAGS
+    if isinstance(node, ast.Constant):
+        return node.value == 0
+    if isinstance(node, ast.Call):  # getattr(os, "O_NOFOLLOW", 0)
+        return (isinstance(node.func, ast.Name) and node.func.id == "getattr" and len(node.args) > 1
+                and isinstance(node.args[1], ast.Constant) and node.args[1].value in _OS_OPEN_READ_FLAGS)
     return False
+
+
+def _flags_read_only(call):
+    node = next((k.value for k in call.keywords if k.arg == "flags"), None)
+    if node is None and len(call.args) > 1:
+        node = call.args[1]
+    return node is not None and _flag_is_read_only(node)  # a variable or unknown constant cannot be shown read-only
+
+
+def _reason_for_reference(origin):
+    module, _, attr = origin.rpartition(".")
+    if module == "os" and attr in _OS_MUTATORS:
+        return origin
+    if module == "shutil" and attr in _SHUTIL_MUTATORS:
+        return origin
+    if module == "tempfile" and attr in _TEMPFILE_MUTATORS:
+        return origin
+    if module in _PATH_CLASSES and attr in _PATH_MUTATORS | {"replace"}:
+        return origin
+    if origin in _ALWAYS_MUTATING:
+        return origin
+    return None
+
+
+def _mutation_reasons(body, module_env, params=()):
+    """Why the statements in ``body`` may change files: a sorted tuple of short descriptions (empty if they cannot)."""
+    env = {k: v for k, v in module_env.items() if k not in params}
+    _bind(body, env)
+    reasons = set()
+    nodes = list(_own_nodes(body))
+    # ``os.unlink in os.supports_dir_fd`` only asks a question about a function; it does not use it.
+    tests = [n for n in nodes if isinstance(n, ast.Compare) and all(isinstance(o, (ast.In, ast.NotIn)) for o in n.ops)]
+    asked = {id(part) for n in tests for part in [n.left, *n.comparators]}
+    for node in nodes:
+        if isinstance(node, ast.Attribute) and node.attr in _WIN32_MUTATORS:
+            reasons.add(f"Win32 {node.attr}")
+        if id(node) in asked:
+            continue
+        if isinstance(node, (ast.Attribute, ast.Name)) and isinstance(getattr(node, "ctx", None), ast.Load):
+            origin = _resolve(node, env)
+            if origin:
+                found = _reason_for_reference(origin)
+                if found:
+                    reasons.add(found)
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        origin = _resolve(func, env)
+        name = func.id if isinstance(func, ast.Name) else None
+        to_devnull = bool(node.args) and _resolve(node.args[0], env) == "os.devnull"  # discarding output is no change
+        if origin is None and name == "open" and "open" not in env and not to_devnull and _mode_writes(node, 1):
+            reasons.add("open() for writing")
+        if origin in _OPEN_CALLS and not to_devnull and _mode_writes(node, _OPEN_CALLS[origin]):
+            reasons.add(f"{origin}() for writing")
+        if origin == "os.open" and not _flags_read_only(node):
+            reasons.add("os.open() that may create or write")
+        if origin in _DYNAMIC or (origin is None and name in {"__import__", "eval", "exec", "compile"}):
+            reasons.add("dynamic import or code execution")
+        if name == "getattr" and node.args and (_resolve(node.args[0], env) or "").split(".")[0] in _TRACKED_MODULES:
+            attr = node.args[1] if len(node.args) > 1 else None
+            if isinstance(attr, ast.Constant) and isinstance(attr.value, str):
+                found = _reason_for_reference(f"{_resolve(node.args[0], env)}.{attr.value}")
+                if found:
+                    reasons.add(f"getattr -> {found}")
+            else:
+                reasons.add("getattr on a file-system module with a computed name")
+        if isinstance(func, ast.Attribute) and origin is None:  # a method on an object whose type is not known
+            if func.attr in _PATH_MUTATORS:
+                reasons.add(f".{func.attr}()")
+            elif func.attr == "replace" and len(node.args) + len(node.keywords) == 1:
+                reasons.add(".replace(target) (Path.replace)")  # str.replace always has two arguments
+            elif func.attr == "open" and _mode_writes(node, 0):
+                reasons.add(".open() for writing")
+    return tuple(sorted(reasons))
+
+
+def _module_env(tree):
+    env = {}
+    _bind(tree.body, env)
+    return {k: v for k, v in env.items() if v.split(".")[0] in _TRACKED_MODULES}
+
+
+def _calls_that_mutate(node, module_env=None):
+    """True if this function's own statements (not nested functions) may change files. Kept for callers and tests."""
+    return bool(_mutation_reasons(node.body, module_env or {}, _params(node)))
+
+
+def _params(node):
+    a = node.args
+    return {x.arg for x in a.posonlyargs + a.args + a.kwonlyargs} | {x.arg for x in (a.vararg, a.kwarg) if x}
+
+
+def import_time_mutations(tree):
+    """Changes made while the module or a class body is executed (not inside any function): never allowed."""
+    env, found = _module_env(tree), []
+    found += [("<module>", r) for r in _mutation_reasons(tree.body, env)]
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef):
+            found += [(node.name, r) for r in _mutation_reasons(node.body, env)]
+    return found
 
 
 def function_table(tree):
     """Map qualified name -> list of definitions (a list longer than one means an ambiguous name)."""
     table = {}
+    env = _module_env(tree)
 
     def visit(node, scope):
         for child in ast.iter_child_nodes(node):
             if isinstance(child, _FUNCS):
                 qualname = ".".join(scope + [child.name])
                 kind = "async def" if isinstance(child, ast.AsyncFunctionDef) else "def"
-                table.setdefault(qualname, []).append(Fn(qualname, kind, _own_lines(child), _calls_that_mutate(child)))
+                reasons = _mutation_reasons(child.body, env, _params(child))
+                table.setdefault(qualname, []).append(Fn(qualname, kind, _own_lines(child), reasons))
                 visit(child, scope + [child.name])
             elif isinstance(child, ast.ClassDef):
                 visit(child, scope + [child.name])
@@ -198,7 +433,26 @@ def analyse(source_text, entry):
         if key not in entry:
             failures.append(f"the coverage report has no '{key}': run the tests with branch coverage enabled")
             return [], failures
-    table = function_table(ast.parse(source_text))
+    tree = ast.parse(source_text)
+    table = function_table(tree)
+    failures += [f"'from {module} import *' hides which functions are called, so this file cannot be analysed"
+                 for module in _star_imports(tree)]
+    failures += [f"{where}: changes files when the module is imported ({reason}); never allowed"
+                 for where, reason in import_time_mutations(tree)]
+    for name in table:
+        if name.split(".")[-1].startswith("_win_") and name not in WINDOWS_ONLY:
+            failures.append(f"{name}: a Win32 helper (name starts with _win_) that is not listed in WINDOWS_ONLY")
+    for name in WINDOWS_ONLY:
+        definitions = table.get(name)
+        if not definitions:
+            failures.append(f"{name}: listed in WINDOWS_ONLY but not found in the source")
+        elif len(definitions) > 1:
+            failures.append(f"{name}: defined {len(definitions)} times; a Windows-only function must be unambiguous")
+        elif "excluded_lines" not in entry:
+            failures.append(f"{name}: the report has no 'excluded_lines', so the pragma cannot be checked")
+        elif measure(definitions[0], entry).statements:
+            failures.append(f"{name}: has statements that were measured, so it is not excluded as Windows-only: "
+                            "give it a CRITICAL tier instead (or mark every statement 'pragma: no cover')")
     rows = []
     for name in CRITICAL:
         definitions = table.get(name)
@@ -222,9 +476,12 @@ def analyse(source_text, entry):
             failures.append(f"{name}: branch coverage {m.branch_pct:.1f}% "
                             f"({m.branches_covered} of {m.branches}) is below {req.branch}%")
     for name, definitions in table.items():
-        if any(d.mutates_files for d in definitions) and name not in CRITICAL:
-            failures.append(f"{name}: deletes, renames or changes files or permissions but is not listed in "
-                            "CRITICAL, so it is not covered by this gate")
+        if name in CRITICAL or name in WINDOWS_ONLY:
+            continue
+        reasons = sorted({r for d in definitions for r in d.reasons})
+        if reasons:
+            failures.append(f"{name}: may change files, permissions or processes ({', '.join(reasons)}) but is not "
+                            "listed in CRITICAL, so it is not covered by this gate")
     return rows, failures
 
 
@@ -250,7 +507,8 @@ def find_entry(report, source):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0], epilog=LIMITATIONS,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("report", help="coverage.json")
     parser.add_argument("--source", default=SCRIPT, help="path of the measured source file")
     args = parser.parse_args(argv)

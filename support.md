@@ -28,7 +28,7 @@ When reporting a problem, include:
 
 ## Storage and permission problems
 
-If a command stops with exit code 7, the transcript storage folder could not be used. The message says why (no free space, read-only location, permission denied, a symbolic link, or a folder owned by another user). Free some space, or point `TUBEGPT_STORAGE_DIR` at a folder of your own. Cleanup never deletes anything in a folder you chose with `TUBEGPT_STORAGE_DIR` unless you also set `TUBEGPT_STORAGE_CLEANUP=1`; see the README section "Storage and retention".
+If a command stops with exit code 7, the transcript storage folder could not be used. The message says why (no free space, read-only location, permission denied, a symbolic link or junction, or a folder owned by another user, which on Windows includes a folder whose owner could not be read). Free some space, or point `TUBEGPT_STORAGE_DIR` at a folder of your own. Cleanup never deletes anything in a folder you chose with `TUBEGPT_STORAGE_DIR` unless you also set `TUBEGPT_STORAGE_CLEANUP=1`; see the README section "Storage and retention".
 
 ## Protect your privacy
 

@@ -56,15 +56,35 @@ def tree():
     return ast.parse(SCRIPT.read_text(encoding="utf-8"))
 
 
-def test_script_has_no_dangerous_imports(tree):
-    banned = {"subprocess", "pickle", "marshal", "shelve", "ctypes", "socket", "ftplib", "telnetlib", "pty"}
+def _imports_outside(tree, allowed_function):
+    """Top-level names imported anywhere except inside the one function ``allowed_function``."""
+    inside = set()
+    for func in ast.walk(tree):
+        if isinstance(func, ast.FunctionDef) and func.name == allowed_function:
+            inside |= {id(node) for node in ast.walk(func)}
     imported = set()
     for node in ast.walk(tree):
+        if id(node) in inside:
+            continue
         if isinstance(node, ast.Import):
             imported |= {a.name.split(".")[0] for a in node.names}
         elif isinstance(node, ast.ImportFrom) and node.module:
             imported.add(node.module.split(".")[0])
+    return imported
+
+
+def test_script_has_no_dangerous_imports(tree):
+    banned = {"subprocess", "pickle", "marshal", "shelve", "ctypes", "socket", "ftplib", "telnetlib", "pty"}
+    # ctypes is allowed in exactly one place: _win_api, the Windows-only function that reads file owners and deletes
+    # through an open handle (the standard library has no other way). Anywhere else it is still banned.
+    imported = _imports_outside(tree, "_win_api")
     assert not imported & banned, f"unexpected imports: {imported & banned}"
+
+
+def test_ctypes_is_imported_only_inside_the_windows_helper(tree):
+    users = [func.name for func in ast.walk(tree) if isinstance(func, ast.FunctionDef)
+             and any(isinstance(n, (ast.Import, ast.ImportFrom)) and "ctypes" in ast.dump(n) for n in ast.walk(func))]
+    assert users == ["_win_api"], users
 
 
 def test_script_has_no_dynamic_code_execution_or_shell(tree):

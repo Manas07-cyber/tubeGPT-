@@ -12,5 +12,7 @@ select = ["E", "F", "W", "B", "S"]
 "tests/*" = ["S101", "S105", "S106", "S108", "S311", "E501"]   # E501: long caption/JSON sample strings
 # The concurrency tests start the project's own script with sys.executable and fixed arguments (no shell, no input).
 "tests/test_storage_security.py" = ["S603"]
+# The Windows tests run icacls.exe and cmd.exe (full System32 paths, fixed arguments, no shell) to set an owner and make a junction.
+"tests/test_windows_security.py" = ["S603"]
 # Realistic YouTube rolling-caption samples contain whitespace-only lines on purpose (the parser handles them).
 "tests/test_subtitles.py" = ["W293"]

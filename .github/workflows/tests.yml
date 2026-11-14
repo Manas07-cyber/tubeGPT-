@@ -1,47 +1,181 @@
 name: tests
 
+# Supported Python versions: 3.11, 3.12, 3.13, 3.14 and 3.15 (3.9 and 3.10 are end-of-life: see README).
+# Actions are pinned to full commit SHAs; the comment after each SHA names the release it is.
+# Pins are refreshed by Dependabot (.github/dependabot.yml) or by hand.
+
 on:
   push:
     branches: [main]
   pull_request:
   workflow_dispatch:
 
-permissions:
-  contents: read
+# No job below needs to write to the repository, so the workflow token gets no permissions by default;
+# each job asks only for read access to the repository contents.
+permissions: {}
+
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  # makes tests/test_dependencies.py verify that the installed packages are exactly the ones in constraints.txt
+  TUBEGPT_CHECK_INSTALLED_PINS: "1"
 
 jobs:
-  pytest:
-    # pinned so Python 3.9 stays available; ubuntu-latest no longer ships it
+  static:
+    name: static checks (lint, compile, dependencies, manifest, docs, repository hygiene)
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - name: Install (pip itself, then the dependencies, both pinned)
+        run: |
+          python -m pip install -r requirements-ci.txt
+          python -m pip install -r requirements-dev.txt
+      - name: Dependency consistency (no conflicts)
+        run: python -m pip check
+      - name: Compile all Python files
+        run: python -m compileall -q skills tests
+      - name: Lint (ruff - style, bugbear and security rules)
+        run: python -m ruff check .
+      - name: Dependency, manifest, repository-security, documentation and workflow checks
+        run: >
+          python -m pytest -q -rs
+          tests/test_dependencies.py tests/test_manifests.py tests/test_repo_hygiene.py
+          tests/test_docs.py tests/test_workflows.py
+
+  test-linux:
+    name: tests (Linux, Python ${{ matrix.python-version }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.9", "3.11", "3.13"]
+        python-version: ["3.11", "3.12", "3.13", "3.14", "3.15"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ matrix.python-version }}
-      - name: Install dependencies
+      - name: Install (pip itself, then the dependencies, both pinned)
+        run: |
+          python -m pip install -r requirements-ci.txt
+          python -m pip install -r requirements-dev.txt
+          python -m pip check
+      - name: Full test suite with coverage (the integration test stays skipped unless explicitly enabled)
+        run: python -m pytest -rs --cov --cov-report=term-missing:skip-covered --cov-report=json:coverage.json
+      - name: Coverage of the security-critical functions
+        if: matrix.python-version == '3.13'
+        run: python .github/scripts/security_coverage.py coverage.json
+
+  # Windows and macOS: the same suite on the oldest and newest supported Python. Tests that need POSIX
+  # permissions, symbolic links or user IDs are marked and skipped on Windows with that stated reason.
+  test-os:
+    name: tests (${{ matrix.os }}, Python ${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2025, macos-15]
+        python-version: ["3.11", "3.15"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install (pip itself, then the dependencies, both pinned)
+        run: |
+          python -m pip install -r requirements-ci.txt
+          python -m pip install -r requirements-dev.txt
+          python -m pip check
+      - name: Full test suite
+        run: python -m pytest -rs
+
+  # Manual helper (Actions tab -> tests -> Run workflow): prints the newest versions that satisfy the declared
+  # requirements on each supported Python and operating system, so constraints.txt, requirements-ci.txt and
+  # requirements-audit.txt can be refreshed deliberately. It installs WITHOUT constraints on purpose and changes
+  # nothing in the repository.
+  resolve-pins:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: ubuntu-24.04, python-version: "3.11"}
+          - {os: ubuntu-24.04, python-version: "3.13"}
+          - {os: ubuntu-24.04, python-version: "3.15"}
+          - {os: windows-2025, python-version: "3.11"}
+          - {os: windows-2025, python-version: "3.15"}
+          - {os: macos-15, python-version: "3.11"}
+          - {os: macos-15, python-version: "3.15"}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Newest pip, then the development set without constraints
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
-          python -m pip install -r requirements-dev.txt
-      - name: Compile all Python files
-        run: python -m compileall -q skills tests
-      - name: Run tests
-        run: python -m pytest -q
+          python -m pip --version
+          grep -v '^-c ' requirements-dev.txt > .resolve-dev.txt
+          python -m pip install -r .resolve-dev.txt
+          echo "=== FREEZE-DEV ${{ matrix.os }} python ${{ matrix.python-version }} ==="
+          python -m pip freeze --all
+          echo "=== END-FREEZE-DEV ==="
+      - name: Newest pip-audit in its own environment
+        if: runner.os == 'Linux'
+        run: |
+          python -m venv "$RUNNER_TEMP/audit-tool"
+          "$RUNNER_TEMP/audit-tool/bin/python" -m pip install --upgrade pip pip-audit
+          echo "=== FREEZE-AUDIT python ${{ matrix.python-version }} ==="
+          "$RUNNER_TEMP/audit-tool/bin/python" -m pip freeze --all
+          echo "=== END-FREEZE-AUDIT ==="
 
   # Manual smoke test only (Actions tab -> tests -> Run workflow). Makes ONE normal caption
   # request for one public video, no cookies or credentials. Never runs on push or pull request.
   live-fetch:
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          python-version: "3.12"
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
       - run: python -m pip install -r requirements.txt
       - name: Fetch one public transcript
         run: |
@@ -55,13 +189,14 @@ jobs:
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    permissions: {}
     env:
       PAGES_BASE: https://manas07-cyber.github.io/tubeGPT-/
       REPO_URL_PREFIX: https://github.com/Manas07-cyber/tubeGPT-
     steps:
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
-          python-version: "3.12"
+          python-version: "3.13"
       - name: Check public pages and links
         run: |
           python - <<'PY'

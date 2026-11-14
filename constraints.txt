@@ -1,0 +1,36 @@
+# Exact versions that CI installs (resolved by CI on Python 3.11-3.15 on Linux, Windows and macOS on 2026-11-10;
+# identical everywhere except typing_extensions, which pip only installs below Python 3.13, and colorama, which
+# pytest installs on Windows only). requirements-dev.txt
+# applies this file automatically, so a development install is reproducible:
+#   python -m pip install -r requirements-dev.txt
+# Normal users install from requirements.txt alone and so receive newer compatible releases (including security
+# fixes). Refresh these pins deliberately: run the manual "resolve-pins" job (Actions tab -> tests -> Run
+# workflow), update this file from its output, and let CI prove the result. Dependabot proposes updates weekly.
+#
+# Runtime (skills/youtube-conversation/scripts/transcript.py, "fetch" command only)
+youtube-transcript-api==1.2.5
+defusedxml==0.7.1
+requests==2.34.2
+urllib3==2.8.0
+certifi==2026.10.23
+charset-normalizer==3.5.2
+idna==3.20
+# Tests and coverage
+pytest==9.2.0
+# colorama is installed by pytest on Windows only; an unmarked pin is harmless elsewhere
+colorama==0.4.6
+pluggy==1.7.0
+iniconfig==2.3.1
+packaging==26.3
+pygments==2.21.0
+pytest-cov==7.1.0
+coverage==7.17.2
+# Manifest validation against the published JSON schema
+jsonschema==4.26.0
+jsonschema-specifications==2025.9.1
+referencing==0.37.0
+rpds-py==2026.9.1
+attrs==26.1.0
+typing_extensions==4.16.0
+# Linter (pinned so new lint rules never break the build unexpectedly)
+ruff==0.17.4

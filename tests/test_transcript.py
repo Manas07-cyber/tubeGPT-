@@ -1,4 +1,5 @@
 import json
+import re
 import sys
 import types
 
@@ -141,8 +142,8 @@ def test_pasted_text_without_video_gets_hash_name(run, tmp_path, docs, isolated_
     f = tmp_path / "n.txt"
     f.write_text(docs.PLAIN, encoding="utf-8")
     assert run("parse", str(f))[0] == 0
-    names = [p.name for p in isolated_tmp.iterdir()]
-    assert len(names) == 1 and names[0].startswith("pasted-") and names[0].endswith(".json")
+    names = [p.name for p in isolated_tmp.iterdir() if p.name != ".tubegpt-lock"]
+    assert len(names) == 1 and re.fullmatch(r"pasted-[0-9a-f]{32}\.json", names[0])   # 128 bits of SHA-256
 
 
 def test_parse_empty_input(run, tmp_path):
@@ -162,11 +163,15 @@ def test_parse_bad_video_argument(run, tmp_path, docs):
     assert code == 2 and "video ID" in err
 
 
-def test_parse_non_utf8_bytes_do_not_crash(run, tmp_path):
+def test_parse_non_utf8_bytes_are_refused_with_a_clear_error(run, tmp_path):
+    # Deliberate change: invalid UTF-8 used to be imported with U+FFFD replacement characters, silently
+    # corrupting words. It is now a controlled error and nothing is written.
     f = tmp_path / "bin.txt"
     f.write_bytes(b"caf\xe9 line one\nsecond line\n")
-    code, _, _ = run("parse", str(f), "--out", str(tmp_path / "o.json"))
-    assert code == 0
+    out = tmp_path / "o.json"
+    code, _, err = run("parse", str(f), "--out", str(out))
+    assert code == 2 and "not valid UTF-8" in err and "Traceback" not in err
+    assert not out.exists()
 
 
 def test_show_prints_timestamped_lines(run, tmp_path, docs):
@@ -318,7 +323,8 @@ def test_unknown_command_is_argparse_error(run):
 
 # ---------------------------------------------------------------- file handling / temp cleanup
 def test_default_dir_is_under_system_tempdir(tr, monkeypatch):
-    import importlib.util, tempfile
+    import importlib.util
+    import tempfile
     spec = importlib.util.spec_from_file_location("fresh", tr.__file__)
     fresh = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(fresh)
@@ -330,7 +336,7 @@ def test_nothing_written_outside_given_dirs(run, tmp_path, docs, isolated_tmp):
     f.write_text(docs.SRT, encoding="utf-8")
     run("parse", str(f), "--video", VID)
     written = {p.name for p in isolated_tmp.iterdir()}
-    assert written == {f"{VID}.json"}                     # only the transcript, no stray temp files
+    assert written == {f"{VID}.json", ".tubegpt-lock"}    # the transcript and the lock file, no stray temp files
 
 
 def test_temp_store_removed_after_test(tmp_path, isolated_tmp, run, docs):
@@ -475,7 +481,8 @@ def test_fetch_failure_writes_nothing(run, monkeypatch, isolated_tmp):
 
 
 def test_oembed_failure_never_breaks_fetch(tr, monkeypatch):
-    import importlib.util, urllib.request
+    import importlib.util
+    import urllib.request
     spec = importlib.util.spec_from_file_location("fresh2", tr.__file__)
     fresh = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(fresh)
@@ -487,7 +494,8 @@ def test_oembed_failure_never_breaks_fetch(tr, monkeypatch):
 
 
 def test_oembed_only_contacts_youtube(tr, monkeypatch):
-    import importlib.util, urllib.request
+    import importlib.util
+    import urllib.request
     spec = importlib.util.spec_from_file_location("fresh3", tr.__file__)
     fresh = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(fresh)
@@ -560,5 +568,5 @@ def test_link_rejects_out_of_range_components(run, tmp_path, docs, bad):
 def test_link_and_show_still_accept_boundary_times(run, tmp_path, docs):
     *_, path = parse_file(run, tmp_path, docs.SRT, "a.srt")
     code, out, _ = run("link", str(path), "0:59", "1:00", "0:59:59")
-    assert code == 0 and f"?t=59)" in out and f"?t=60)" in out and f"?t=3599)" in out
+    assert code == 0 and "?t=59)" in out and "?t=60)" in out and "?t=3599)" in out
     assert run("show", str(path), "--from", "0:59", "--to", "1:59")[0] == 0

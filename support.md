@@ -24,6 +24,11 @@ When reporting a problem, include:
 - Try another video with publicly available captions.
 - If you have permission to use the transcript, try a supported transcript file.
 - Remember that auto-generated captions may contain errors.
+- If you run the helper script yourself, add `-v` before the command (for example `transcript.py -v show VIDEO_ID`) to get diagnostic logs. They never contain transcript text, but still check them for personal information before posting.
+
+## Storage and permission problems
+
+If a command stops with exit code 7, the transcript storage folder could not be used. The message says why (no free space, read-only location, permission denied, a symbolic link or junction, or a folder owned by another user, which on Windows includes a folder whose owner could not be read). Free some space, or point `TUBEGPT_STORAGE_DIR` at a folder of your own. Cleanup never deletes anything in a folder you chose with `TUBEGPT_STORAGE_DIR` unless you also set `TUBEGPT_STORAGE_CLEANUP=1`; see the README section "Storage and retention".
 
 ## Protect your privacy
 

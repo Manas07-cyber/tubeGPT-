@@ -1,0 +1,2 @@
+# Tooling that CI installs before everything else. Pinned so the installer itself is reproducible.
+pip==26.3

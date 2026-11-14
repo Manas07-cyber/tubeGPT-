@@ -1,2 +1,9 @@
+# Development and test dependencies. The constraints file makes the install exact and reproducible (the same
+# versions CI uses): python -m pip install -r requirements-dev.txt
 -r requirements.txt
+-c constraints.txt
 pytest>=8,<10
+# coverage reporting (.coveragerc) and validation of the plugin manifest against its published JSON schema
+pytest-cov>=6,<8
+jsonschema>=4.20,<5
+ruff>=0.16,<1
